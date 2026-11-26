@@ -97,3 +97,13 @@ node <skill-dir>/scripts/proof_commit.mjs commit \
   --pick-after "accepts zero quantity"
 ```
 Confirm `proof_commit.mjs` reports `COMMIT_VERIFIED` (`tree`, `parent`, and `Evidence-ID` verified via `git cat-file commit`).
+
+### Step 6 — Publish Per-Commit Verbatim & Visual Proof to GitHub PR (`gh >= 2.103.0`)
+After pushing your feature/fix branch (`git push -u origin <branch>`), publish or update the Pull Request with native `--attach` screenshot uploads and cryptographic/remote read-back verification:
+```bash
+node <skill-dir>/scripts/proof_commit.mjs publish-pr \
+  --base main \
+  --title "fix(parser): allow zero quantity in boundary validation" \
+  --closes 42
+```
+`publish-pr` re-verifies every commit's Git object, `Evidence-ID`, raw log hashes, and PNG integrity across `base..HEAD`, uploads digest-bound `evc-<shortSha>-<before|after>-<sha256>` images from a clean staging working directory, preserves human PR notes outside its bounded report markers, recovers cleanly if a prior `--attach` upload partially succeeded, and verifies `headRefOid`, `baseRefName`, and exact report read-back on GitHub.

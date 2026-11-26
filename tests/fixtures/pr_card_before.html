@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Evidence Card Fixture — Before (Overflow Defect)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { width: 390px; }
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 16px;
+    }
+    .banner {
+      background: #3d1d24;
+      border: 1px solid #f85149;
+      color: #ffa198;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 10px;
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    /* Intentional fixture defect: rigid 680px width overflows 390px mobile viewport */
+    .card {
+      width: 680px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      white-space: nowrap;
+      margin-bottom: 12px;
+    }
+    .title { font-size: 15px; font-weight: 700; }
+    .badge {
+      background: #238636;
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .log {
+      background: #010409;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      color: #ff7b72;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="banner">FIXTURE BEFORE · 390px mobile viewport · scrollWidth = 696px (clipped)</div>
+  <div class="card">
+    <div class="header-row">
+      <span class="title">fix(parser): allow zero quantity in order boundary validation</span>
+      <span class="badge">VERIFIED CLIPPED OFF-SCREEN</span>
+    </div>
+    <div class="log">| accepts-zero | expected=true actual=false  [exit 1 — horizontal overflow]</div>
+  </div>
+</body>
+</html>

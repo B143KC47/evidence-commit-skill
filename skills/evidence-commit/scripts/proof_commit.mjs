@@ -802,7 +802,14 @@ function parseFlags(argv) {
       while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
         multi[key].push(argv[++i]);
       }
-    } else if (arg === "--reset-index" || arg === "--help" || arg === "-h") {
+    } else if (
+      arg === "--reset-index" ||
+      arg === "--help" ||
+      arg === "-h" ||
+      arg === "--draft" ||
+      arg === "--allow-partial-commits" ||
+      arg === "--skip-push-check"
+    ) {
       flags[arg.replace(/^-+/, "")] = true;
     } else if (arg.startsWith("--")) {
       const key = arg.slice(2);
@@ -819,14 +826,609 @@ function printHelp() {
   process.stdout.write(`Usage: node proof_commit.mjs <subcommand> [options]
 
 Subcommands:
-  stage      --files <relpath...> [--reset-index]
-  init       [--case "<acceptance condition>"] [--mode snapshot|workspace] [--run-id <id>]
-  record     --phase before|after [--overlay <test-relpath...>] [--mode snapshot|workspace] -- <exe> [args...]
-  attach-ui  [--before <imgPath>] --after <imgPath> --route <route> --viewport <WxH> [--notes "<text>"]
-  verify     --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [...]
-  commit     --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [...]
-  inspect    [<commit-oid>]
+  stage       --files <relpath...> [--reset-index]
+  init        [--case "<acceptance condition>"] [--mode snapshot|workspace] [--run-id <id>]
+  record      --phase before|after [--overlay <test-relpath...>] [--mode snapshot|workspace] -- <exe> [args...]
+  attach-ui   [--before <imgPath>] --after <imgPath> --route <route> --viewport <WxH> [--notes "<text>"]
+  verify      --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [...]
+  commit      --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [...]
+  publish-pr  [--base <branch>] [--title "<title>"] [--summary "<text>"] [--closes <n>] [--draft]
+  inspect     [<commit-oid>]
 `);
+}
+
+export function safeFenceForText(text) {
+  let maxTicks = 2;
+  for (const m of String(text || "").matchAll(/`+/g)) {
+    if (m[0].length > maxTicks) maxTicks = m[0].length;
+  }
+  return "`".repeat(maxTicks + 1);
+}
+
+const REPORT_START_MARKER = "<!-- evidence-commit-report:start -->";
+const REPORT_END_MARKER = "<!-- evidence-commit-report:end -->";
+const MAX_ATTACH_PER_CALL = 40;
+
+function countOccurrences(haystack, needle) {
+  let count = 0;
+  let idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count += 1;
+    idx += needle.length;
+  }
+  return count;
+}
+
+function extractSingleReportBlock(bodyText) {
+  if (!bodyText) return null;
+  const sc = countOccurrences(bodyText, REPORT_START_MARKER);
+  const ec = countOccurrences(bodyText, REPORT_END_MARKER);
+  if (sc === 0 && ec === 0) return null;
+  if (sc !== 1 || ec !== 1) {
+    throw new Error(
+      `Ambiguous or corrupted report markers in PR body (start=${sc}, end=${ec}); inspect PR description manually.`,
+    );
+  }
+  const s = bodyText.indexOf(REPORT_START_MARKER);
+  const e = bodyText.indexOf(REPORT_END_MARKER);
+  if (e <= s) {
+    throw new Error("Corrupted report markers in PR body (end marker precedes start marker).");
+  }
+  return {
+    endIdx: e + REPORT_END_MARKER.length,
+    inner: bodyText.slice(s + REPORT_START_MARKER.length, e).trim(),
+    startIdx: s,
+  };
+}
+
+function parseExistingHostedUiUrls(existingBody) {
+  const map = new Map();
+  const parsed = extractSingleReportBlock(existingBody);
+  if (!parsed) return map;
+  const re = /!\[(evc-[0-9a-f]{8}-(?:before|after)-[0-9a-f]{12})\]\((https:\/\/[^)\s]+)\)/g;
+  for (const m of parsed.inner.matchAll(re)) {
+    map.set(m[1], m[2]);
+  }
+  return map;
+}
+
+function mergeReportBlockIntoBody(existingBody, summaryText, closesIssue, reportInner) {
+  if (
+    reportInner.includes(REPORT_START_MARKER) ||
+    reportInner.includes(REPORT_END_MARKER)
+  ) {
+    throw new Error("Evidence report inner content must not contain report boundary markers.");
+  }
+  const wrapped = `${REPORT_START_MARKER}\n${reportInner.trim()}\n${REPORT_END_MARKER}`;
+  const parsed = extractSingleReportBlock(existingBody);
+  if (parsed) {
+    return `${existingBody.slice(0, parsed.startIdx)}${wrapped}${existingBody.slice(parsed.endIdx)}`.replace(
+      /\s*$/,
+      "\n",
+    );
+  }
+  const parts = [];
+  if (existingBody && existingBody.trim()) {
+    parts.push(existingBody.trim());
+  } else {
+    parts.push("## Summary", "", (summaryText || "Evidence-backed pull request.").trim());
+    if (closesIssue) {
+      parts.push("", `Closes #${String(closesIssue).replace(/^#/, "")}`);
+    }
+  }
+  parts.push("", wrapped, "");
+  return parts.join("\n");
+}
+
+function parseOriginRepoSlug(repoRoot) {
+  const r = git(repoRoot, ["remote", "get-url", "origin"], { allowFail: true });
+  if (r.status !== 0) return null;
+  const url = r.stdout.trim();
+  const httpsMatch = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?$/i.exec(url);
+  return httpsMatch ? httpsMatch[1] : null;
+}
+
+function invokeGhCli(cwd, ghArgs, ghOverride) {
+  const bin = ghOverride || process.env.PROOF_COMMIT_GH_BIN || "gh";
+  let exe = bin;
+  let fullArgs = ghArgs;
+  if (bin.endsWith(".mjs") || bin.endsWith(".js") || bin.endsWith(".cjs")) {
+    exe = process.execPath;
+    fullArgs = [bin, ...ghArgs];
+  }
+  const res = spawnSync(exe, fullArgs, {
+    cwd,
+    env: cleanGitEnv(),
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+    windowsHide: true,
+  });
+  if (res.error) throw res.error;
+  return res;
+}
+
+function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest) {
+  if (manifest.commit_oid !== oid) {
+    throw new Error(`Bundle commit_oid (${manifest.commit_oid}) != ${oid}`);
+  }
+  const rawCommit = git(repoRoot, ["cat-file", "commit", oid]).stdout;
+  const { actualTree, actualParent, bodyBlock, parentCount } =
+    parseCommitObjectHeaderAndBody(rawCommit);
+  if (parentCount > 1) {
+    throw new Error(`Merge commit ${oid.slice(0, 12)} cannot be certified as atomic.`);
+  }
+  if (actualTree !== manifest.tree_oid || actualParent !== manifest.parent_oid) {
+    throw new Error(`Commit ${oid.slice(0, 12)} tree/parent drifted from stored manifest.`);
+  }
+  if (manifest.commit_message && bodyBlock !== manifest.commit_message) {
+    throw new Error(`Commit ${oid.slice(0, 12)} message bytes drifted from stored manifest.`);
+  }
+
+  const canonicalPayload = {
+    after: manifest.after,
+    before: manifest.before,
+    case_name: manifest.case_name,
+    overlay: manifest.overlay || [],
+    parent_oid: manifest.parent_oid,
+    schema_version: manifest.schema_version,
+    scope: manifest.scope ?? null,
+    tree_oid: manifest.tree_oid,
+    type: manifest.type,
+    ui: manifest.ui ?? null,
+    verification_mode: manifest.verification_mode,
+  };
+  const recomputedId = computeEvidenceId(canonicalPayload);
+  if (recomputedId !== manifest.evidence_id) {
+    throw new Error(
+      `Bundle Evidence-ID mismatch on ${oid.slice(0, 12)}: expected ${manifest.evidence_id}, recomputed ${recomputedId}.`,
+    );
+  }
+
+  for (const phaseName of ["before", "after"]) {
+    const pm = manifest[phaseName];
+    if (!pm) continue;
+    for (const stream of ["stdout", "stderr"]) {
+      const logFile = path.join(bundleDir, `${phaseName}.${stream}.log`);
+      const buf = fs.existsSync(logFile) ? fs.readFileSync(logFile) : Buffer.alloc(0);
+      if (sha256Hex(buf) !== pm[`${stream}_sha256`]) {
+        throw new Error(`Raw log digest mismatch on ${oid.slice(0, 12)} ${phaseName}.${stream}.log.`);
+      }
+    }
+    for (const q of pm.quotes || []) {
+      const logFile = path.join(bundleDir, `${phaseName}.${q.stream}.log`);
+      const buf = fs.readFileSync(logFile);
+      const slice = buf.subarray(q.start_byte, q.end_byte);
+      const decoded = decodeStrictUtf8AndValidateDisplay(slice, `${oid.slice(0, 8)}:${phaseName}`);
+      if (decoded !== q.text) {
+        throw new Error(`Stored quote slice mismatch on ${oid.slice(0, 12)} ${phaseName}.`);
+      }
+    }
+  }
+
+  if (manifest.ui_details) {
+    for (const kind of ["before", "after"]) {
+      const meta = manifest.ui_details[kind];
+      if (!meta) continue;
+      const imgPath = path.join(bundleDir, "ui", `${kind}.${meta.ext}`);
+      if (!fs.existsSync(imgPath)) {
+        throw new Error(`Missing stored UI screenshot ${imgPath}.`);
+      }
+      const bytes = fs.readFileSync(imgPath);
+      parseImageDimensions(bytes);
+      if (sha256Hex(bytes) !== meta.sha256) {
+        throw new Error(`Stored UI ${kind} screenshot digest mismatch on ${oid.slice(0, 12)}.`);
+      }
+    }
+  }
+}
+
+function normalizeHostedUrlsForComparison(reportInner) {
+  return reportInner
+    .replace(
+      /!\[(evc-[0-9a-f]{8}-(?:before|after)-[0-9a-f]{12})\]\((?:https:\/\/[^)\s]+|\.\/[^)\s]+)\)/g,
+      "![$1](<HOSTED_ASSET>)",
+    )
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+async function cmdPublishPr(argv) {
+  const { flags } = parseFlags(argv);
+  const { repoRoot, commonDir } = resolveRepoContext();
+  const ghOverride = flags["gh-bin"] || null;
+
+  const headOid = git(repoRoot, ["rev-parse", "HEAD"]).stdout.trim();
+  const headBranch = git(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim();
+  if (!headBranch || headBranch === "HEAD") {
+    throw new Error("`publish-pr` must be run from a named feature/fix branch, not detached HEAD.");
+  }
+
+  const baseBranch = (flags.base || "main").replace(/^origin\//, "");
+  if (headBranch === baseBranch) {
+    throw new Error(`Refusing to run \`publish-pr\` directly on base branch "${baseBranch}".`);
+  }
+
+  const repoSlug = flags.repo || parseOriginRepoSlug(repoRoot);
+  if (!repoSlug) {
+    throw new Error("Could not determine GitHub repository slug (`owner/repo`). Pass `--repo owner/repo` or configure `origin`.");
+  }
+
+  const hasOrigin = git(repoRoot, ["remote", "get-url", "origin"], { allowFail: true }).status === 0;
+  let baseRangeRef = baseBranch;
+  if (hasOrigin && !flags["skip-push-check"] && !ghOverride) {
+    const lsHead = git(repoRoot, ["ls-remote", "--heads", "origin", headBranch]).stdout.trim();
+    const remoteHeadOid = lsHead ? lsHead.split(/\s+/)[0] : null;
+    if (remoteHeadOid !== headOid) {
+      throw new Error(
+        `Local HEAD (${headOid.slice(0, 12)}) does not match remote origin/${headBranch} (${remoteHeadOid ? remoteHeadOid.slice(0, 12) : "unpushed"}). Push your branch before running \`publish-pr\`.`,
+      );
+    }
+    const lsBase = git(repoRoot, ["ls-remote", "--heads", "origin", baseBranch]).stdout.trim();
+    const remoteBaseOid = lsBase ? lsBase.split(/\s+/)[0] : null;
+    if (!remoteBaseOid) {
+      throw new Error(`Base branch "${baseBranch}" was not found on remote origin.`);
+    }
+    baseRangeRef = remoteBaseOid;
+  } else {
+    const originBase = git(repoRoot, ["rev-parse", "--verify", `origin/${baseBranch}`], {
+      allowFail: true,
+    });
+    if (originBase.status === 0) baseRangeRef = `origin/${baseBranch}`;
+  }
+
+  const commitsOut = git(repoRoot, ["rev-list", "--reverse", `${baseRangeRef}..HEAD`]).stdout.trim();
+  const commitOids = commitsOut ? commitsOut.split(/\r?\n/).filter(Boolean) : [];
+  if (commitOids.length === 0) {
+    throw new Error(`No commits found in range ${baseRangeRef.slice(0, 12)}..HEAD.`);
+  }
+
+  const verifiedBundles = [];
+  const missingCommits = [];
+
+  for (const oid of commitOids) {
+    const mapFile = path.join(commonDir, "proof-commit", "commits", `${oid}.json`);
+    if (!fs.existsSync(mapFile)) {
+      missingCommits.push(`${oid.slice(0, 12)} (no local proof-commit bundle)`);
+      continue;
+    }
+    const mapping = JSON.parse(fs.readFileSync(mapFile, "utf8"));
+    const digestHex = mapping.evidence_id.replace(/^sha256:/, "");
+    const bundleDir = path.join(commonDir, "proof-commit", "bundles", digestHex);
+    const manifestPath = path.join(bundleDir, "manifest.json");
+    if (!fs.existsSync(manifestPath)) {
+      missingCommits.push(`${oid.slice(0, 12)} (bundle manifest missing for ${mapping.evidence_id})`);
+      continue;
+    }
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    try {
+      reverifyStoredBundle(repoRoot, oid, bundleDir, manifest);
+    } catch (err) {
+      missingCommits.push(`${oid.slice(0, 12)} (${err.message})`);
+      continue;
+    }
+    const subject = git(repoRoot, ["log", "-1", "--format=%s", oid]).stdout.trim();
+    verifiedBundles.push({ bundleDir, manifest, oid, subject });
+  }
+
+  if (missingCommits.length > 0 && !flags["allow-partial-commits"]) {
+    throw new Error(
+      `Cannot certify PR: unverified commits in range: ${missingCommits.join("; ")}`,
+    );
+  }
+
+  const repoArgs = ["--repo", repoSlug];
+  const findOpenPrByPair = () => {
+    const r = invokeGhCli(
+      repoRoot,
+      [
+        "pr",
+        "list",
+        ...repoArgs,
+        "--state",
+        "open",
+        "--base",
+        baseBranch,
+        "--head",
+        headBranch,
+        "--json",
+        "number,url,body,headRefOid,baseRefName,headRefName,state",
+      ],
+      ghOverride,
+    );
+    if (r.status !== 0) return null;
+    try {
+      const arr = JSON.parse(r.stdout);
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      return (
+        arr.find((p) => p.baseRefName === baseBranch && p.headRefName === headBranch) || null
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const viewPrByNumber = (num) => {
+    const r = invokeGhCli(
+      repoRoot,
+      [
+        "pr",
+        "view",
+        String(num),
+        ...repoArgs,
+        "--json",
+        "number,url,body,headRefOid,baseRefName,headRefName,state",
+      ],
+      ghOverride,
+    );
+    if (r.status !== 0) return null;
+    try {
+      return JSON.parse(r.stdout);
+    } catch {
+      return null;
+    }
+  };
+
+  let existingPr = findOpenPrByPair();
+  if (existingPr && existingPr.headRefOid && existingPr.headRefOid !== headOid) {
+    throw new Error(
+      `Open PR #${existingPr.number} remote headRefOid (${existingPr.headRefOid.slice(0, 12)}) != local HEAD (${headOid.slice(0, 12)}). Push branch before updating PR evidence.`,
+    );
+  }
+
+  const existingHosted = parseExistingHostedUiUrls(existingPr ? existingPr.body : "");
+  const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), "evcommit-pr-"));
+
+  try {
+    const pendingAttachments = [];
+    const expectedUiAltTags = [];
+    const sectionLines = [
+      "## Verification Evidence (`evidence-commit`)",
+      "",
+      `- **Base branch:** \`${baseBranch}\` | **Head OID:** \`${headOid}\``,
+      `- **Verified commits:** ${verifiedBundles.length} / ${commitOids.length}`,
+    ];
+    if (missingCommits.length > 0) {
+      sectionLines.push(`- **Unverified gaps:** ${missingCommits.join("; ")}`);
+    }
+
+    for (const item of verifiedBundles) {
+      const { bundleDir, manifest, oid, subject } = item;
+      const shortSha = oid.slice(0, 8);
+      sectionLines.push(
+        "",
+        `### \`${shortSha}\` — ${subject}`,
+        `- **Tree:** \`${manifest.tree_oid.slice(0, 12)}\` | **Mode:** \`${manifest.verification_mode}\` | **Evidence-ID:** \`${manifest.evidence_id}\``,
+        `- **Case:** ${manifest.case_name}`,
+        `- **Why:** ${manifest.why}`,
+      );
+
+      if (manifest.before) {
+        const bText = manifest.before.quotes.map((q) => q.text).join("\n");
+        const fence = safeFenceForText(bText);
+        sectionLines.push(
+          "",
+          `**Before** (\`${manifest.before.argv_display}\`, exit \`${manifest.before.exit_code}\`):`,
+          `${fence}text`,
+          bText,
+          fence,
+        );
+      }
+
+      if (manifest.after) {
+        const aText = manifest.after.quotes.map((q) => q.text).join("\n");
+        const fence = safeFenceForText(aText);
+        sectionLines.push(
+          "",
+          `**After** (\`${manifest.after.argv_display}\`, exit \`${manifest.after.exit_code}\`):`,
+          `${fence}text`,
+          aText,
+          fence,
+        );
+      }
+
+      if (manifest.ui_details) {
+        const ui = manifest.ui_details;
+        const resolveSlotRef = (kind, metaObj) => {
+          if (!metaObj) return "_N/A (new surface)_";
+          const altTag = `evc-${shortSha}-${kind}-${metaObj.sha256.slice(0, 12)}`;
+          expectedUiAltTags.push(altTag);
+          if (existingHosted.has(altTag)) {
+            return `![${altTag}](${existingHosted.get(altTag)})`;
+          }
+          const srcImg = path.join(bundleDir, "ui", `${kind}.${metaObj.ext}`);
+          const bytes = fs.readFileSync(srcImg);
+          const fileName = `${altTag}.${metaObj.ext}`;
+          fs.writeFileSync(path.join(stageDir, fileName), bytes);
+          pendingAttachments.push({ altTag, fileName });
+          return `![${altTag}](./${fileName})`;
+        };
+
+        const beforeCell = resolveSlotRef("before", ui.before);
+        const afterCell = resolveSlotRef("after", ui.after);
+        sectionLines.push(
+          "",
+          `**Visual Verification** (route \`${ui.route}\`, viewport \`${ui.viewport}\`, theme \`${ui.theme}\`):`,
+          "",
+          "| Before | After |",
+          "| :---: | :---: |",
+          `| ${beforeCell} | ${afterCell} |`,
+        );
+        if (ui.notes) {
+          sectionLines.push("", `- **Inspection notes:** ${ui.notes}`);
+        }
+      }
+    }
+
+    const expectedReportInner = sectionLines.join("\n");
+    const prTitle =
+      flags.title || verifiedBundles[verifiedBundles.length - 1]?.subject || headBranch;
+    scanPublicTextPrivacy(prTitle, "pr_title");
+
+    // Batch attachments in <= MAX_ATTACH_PER_CALL chunks from cwd=stageDir so ./<fileName> resolves on all gh >= 2.99+
+    const batches = [];
+    if (pendingAttachments.length === 0) {
+      batches.push([]);
+    } else {
+      for (let i = 0; i < pendingAttachments.length; i += MAX_ATTACH_PER_CALL) {
+        batches.push(pendingAttachments.slice(i, i + MAX_ATTACH_PER_CALL));
+      }
+    }
+
+    let targetPrNumber = existingPr ? existingPr.number : null;
+    let lastGhRes = null;
+    let latestBody = existingPr ? existingPr.body : null;
+
+    for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+      const batch = batches[bIdx];
+      const currentHosted = parseExistingHostedUiUrls(latestBody || "");
+      let batchInner = expectedReportInner;
+      for (const [altTag, url] of currentHosted.entries()) {
+        batchInner = batchInner.replaceAll(`![${altTag}](./${altTag}.png)`, `![${altTag}](${url})`);
+        batchInner = batchInner.replaceAll(`![${altTag}](./${altTag}.jpg)`, `![${altTag}](${url})`);
+        batchInner = batchInner.replaceAll(`![${altTag}](./${altTag}.webp)`, `![${altTag}](${url})`);
+      }
+
+      const bodyText = mergeReportBlockIntoBody(
+        latestBody,
+        flags.summary || verifiedBundles.map((b) => `- ${b.subject}: ${b.manifest.why}`).join("\n"),
+        flags.closes,
+        batchInner,
+      );
+      scanPublicTextPrivacy(bodyText, "rendered_pr_body");
+
+      const bodyFile = path.join(stageDir, "pr_body.md");
+      fs.writeFileSync(bodyFile, bodyText, "utf8");
+      const attachArgs = batch.flatMap((item) => ["--attach", `./${item.fileName}`]);
+
+      if (!targetPrNumber) {
+        lastGhRes = invokeGhCli(
+          stageDir,
+          [
+            "pr",
+            "create",
+            ...repoArgs,
+            "--base",
+            baseBranch,
+            "--head",
+            headBranch,
+            "--title",
+            prTitle,
+            "--body-file",
+            "pr_body.md",
+            ...(flags.draft ? ["--draft"] : []),
+            ...attachArgs,
+          ],
+          ghOverride,
+        );
+        const discovered = findOpenPrByPair();
+        if (discovered) {
+          targetPrNumber = discovered.number;
+          latestBody = discovered.body;
+        }
+      } else {
+        const freshBeforeEdit = viewPrByNumber(targetPrNumber);
+        if (freshBeforeEdit) latestBody = freshBeforeEdit.body;
+        const refreshedBody = mergeReportBlockIntoBody(
+          latestBody,
+          flags.summary,
+          flags.closes,
+          batchInner,
+        );
+        scanPublicTextPrivacy(refreshedBody, "rendered_pr_body");
+        fs.writeFileSync(bodyFile, refreshedBody, "utf8");
+
+        lastGhRes = invokeGhCli(
+          stageDir,
+          [
+            "pr",
+            "edit",
+            String(targetPrNumber),
+            ...repoArgs,
+            "--body-file",
+            "pr_body.md",
+            ...attachArgs,
+          ],
+          ghOverride,
+        );
+        const afterBatchView = viewPrByNumber(targetPrNumber);
+        if (afterBatchView) latestBody = afterBatchView.body;
+      }
+    }
+
+    if (!targetPrNumber) {
+      throw new Error(
+        `gh PR creation failed and no open PR was found for ${headBranch} -> ${baseBranch}: ${(lastGhRes?.stderr || lastGhRes?.stdout || "").trim()}`,
+      );
+    }
+
+    const remotePr = viewPrByNumber(targetPrNumber);
+    if (!remotePr) {
+      throw new Error(`Could not read back PR #${targetPrNumber} from GitHub.`);
+    }
+    if (remotePr.baseRefName && remotePr.baseRefName !== baseBranch) {
+      throw new Error(
+        `Remote PR #${remotePr.number} targets base "${remotePr.baseRefName}", expected "${baseBranch}".`,
+      );
+    }
+    if (remotePr.headRefOid !== headOid) {
+      throw new Error(
+        `Remote PR #${remotePr.number} headRefOid (${remotePr.headRefOid}) != local HEAD (${headOid}).`,
+      );
+    }
+
+    const remoteBlock = extractSingleReportBlock(remotePr.body || "");
+    if (!remoteBlock) {
+      throw new Error(
+        `Remote PR #${remotePr.number} body is missing the evidence-commit report block.`,
+      );
+    }
+
+    const residualLocal = [...remoteBlock.inner.matchAll(/!\[evc-[^\]]+\]\(\.\/[^)]+\)/g)].map(
+      (m) => m[0],
+    );
+    if (residualLocal.length > 0) {
+      throw new Error(
+        `PARTIAL_PUBLISH_INCOMPLETE: PR ${remotePr.url} exists, but ${residualLocal.length} image attachment(s) remain un-hosted (${residualLocal.join(", ")}). Re-run \`publish-pr\` to recover.`,
+      );
+    }
+
+    const remoteHosted = parseExistingHostedUiUrls(remotePr.body || "");
+    for (const altTag of expectedUiAltTags) {
+      if (!remoteHosted.has(altTag)) {
+        throw new Error(
+          `PARTIAL_PUBLISH_INCOMPLETE: PR ${remotePr.url} is missing hosted asset URL for ${altTag}.`,
+        );
+      }
+    }
+
+    if (
+      normalizeHostedUrlsForComparison(remoteBlock.inner) !==
+      normalizeHostedUrlsForComparison(expectedReportInner)
+    ) {
+      throw new Error(
+        `Remote PR #${remotePr.number} evidence block content drifted from expected verified report.`,
+      );
+    }
+
+    if (lastGhRes && lastGhRes.status !== 0) {
+      throw new Error(
+        `gh exited with non-zero code ${lastGhRes.status}: ${(lastGhRes.stderr || "").trim()}`,
+      );
+    }
+
+    if (missingCommits.length > 0 || verifiedBundles.length === 0) {
+      process.stdout.write(
+        `PUBLISH_PR_PARTIAL_GAPS number=${remotePr.number} url=${remotePr.url} verified=${verifiedBundles.length}/${commitOids.length}\n`,
+      );
+      process.exit(4);
+    }
+
+    process.stdout.write(
+      `PUBLISH_PR_VERIFIED number=${remotePr.number} url=${remotePr.url} head=${remotePr.headRefOid} ui_attachments=${expectedUiAltTags.length}\n`,
+    );
+  } finally {
+    fs.rmSync(stageDir, { recursive: true, force: true });
+  }
 }
 
 async function cmdStage(argv) {
@@ -1479,6 +2081,7 @@ async function main() {
   else if (sub === "attach-ui") await cmdAttachUi(rest);
   else if (sub === "verify") await cmdVerify(rest);
   else if (sub === "commit") await cmdCommit(rest);
+  else if (sub === "publish-pr") await cmdPublishPr(rest);
   else if (sub === "inspect") await cmdInspect(rest);
   else fail(`Unknown subcommand "${sub}". Run with --help for usage.`, 2);
 }

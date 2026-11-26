@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Evidence Card Fixture — After (Responsive Fix)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { width: 390px; }
+    body {
+      width: 390px;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 16px;
+    }
+    .banner {
+      background: #122d1f;
+      border: 1px solid #2ea043;
+      color: #7ee787;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 8px 10px;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      overflow-wrap: anywhere;
+    }
+    /* Responsive fix: max-width 100% + flex-wrap + wrapped code block */
+    .card {
+      width: 100%;
+      max-width: 100%;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .header-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .badge {
+      background: #238636;
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .log {
+      background: #010409;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      color: #7ee787;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <div class="banner">FIXTURE AFTER · 390px mobile viewport · scrollWidth = 390px (0px overflow)</div>
+  <div class="card">
+    <div class="header-row">
+      <span class="title">fix(parser): allow zero quantity in order boundary validation</span>
+      <span class="badge">COMMIT_VERIFIED</span>
+    </div>
+    <div class="log">| accepts-zero | expected=true actual=true  [exit 0 — responsive wrap]</div>
+  </div>
+</body>
+</html>

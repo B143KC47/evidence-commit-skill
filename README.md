@@ -66,6 +66,12 @@ node skills/evidence-commit/scripts/proof_commit.mjs commit \
   --why "Validator rejected 0 with strict > 0 comparison despite API contract allowing zero-delta adjustments; relax lower bound to >= 0." \
   --pick-before "accepts zero quantity" \
   --pick-after "accepts zero quantity"
+
+# 6. Push branch & publish PR with native GitHub CLI (gh >= 2.103.0) --attach screenshots
+git push -u origin fix/zero-quantity
+node skills/evidence-commit/scripts/proof_commit.mjs publish-pr \
+  --base main \
+  --title "fix(validator): allow zero quantity in boundary check"
 ```
 
 ## Verification Guarantee
