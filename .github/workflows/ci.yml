@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Configure Git test identity
+        run: |
+          git config --global user.name "CI Runner"
+          git config --global user.email "ci@example.com"
+
+      - name: Syntax check
+        run: node --check skills/evidence-commit/scripts/proof_commit.mjs
+
+      - name: Run automated test suite
+        run: node --test tests/*.test.mjs
