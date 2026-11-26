@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" fill="none" role="img" aria-label="Evidence Commit — Software-engineering-grade atomic commits with tree-bound verbatim proof">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1200" y2="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0E1014"/>
+      <stop offset="100%" stop-color="#13161C"/>
+    </linearGradient>
+    <filter id="cardShadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="428" rx="22" fill="url(#bgGrad)" stroke="#282E3A" stroke-width="1.5"/>
+  <line x1="604" y1="36" x2="604" y2="394" stroke="#282E3A" stroke-width="1" stroke-dasharray="4 4"/>
+
+  <rect x="52" y="48" width="286" height="28" rx="14" fill="#2A1B15" stroke="#5E3729" stroke-width="1"/>
+  <circle cx="69" cy="62" r="4" fill="#E8845C"/>
+  <text x="82" y="66" fill="#E8845C" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.05em">EVIDENCE-COMMIT · GIT PROTOCOL</text>
+
+  <text x="52" y="132" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="44" font-weight="400" letter-spacing="-0.02em">A commit is <tspan font-style="italic" fill="#E8845C">not</tspan> Ctrl+S.</text>
+  <text x="52" y="182" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="40" font-weight="400" letter-spacing="-0.02em">Ship proof, not paraphrases.</text>
+
+  <text x="52" y="228" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="400">Partition dirty diffs into revertable, bisectable atomic commits—</text>
+  <text x="52" y="252" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="400">verified on an isolated checkout of <tspan font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="13.5" fill="#F4F3EF">git write-tree</tspan> with</text>
+  <text x="52" y="276" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="400">byte-exact terminal quotes and digest-bound GitHub PR visuals.</text>
+
+  <text x="52" y="324" fill="#8B92A2" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="600" letter-spacing="0.06em">COMPACT DISCOVERY METADATA (~75 IDLE TOKENS)</text>
+
+  <g transform="translate(52, 338)">
+    <rect x="0" y="0" width="132" height="32" rx="8" fill="#171A21" stroke="#282E3A" stroke-width="1"/>
+    <text x="66" y="20" text-anchor="middle" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">Antigravity</text>
+
+    <rect x="142" y="0" width="108" height="32" rx="8" fill="#171A21" stroke="#282E3A" stroke-width="1"/>
+    <text x="196" y="20" text-anchor="middle" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">Codex CLI</text>
+
+    <rect x="260" y="0" width="116" height="32" rx="8" fill="#171A21" stroke="#282E3A" stroke-width="1"/>
+    <text x="318" y="20" text-anchor="middle" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">Claude Code</text>
+
+    <rect x="386" y="0" width="128" height="32" rx="8" fill="#0F291E" stroke="#1E5941" stroke-width="1"/>
+    <text x="450" y="20" text-anchor="middle" fill="#34D399" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11.5" font-weight="600">0 Dependencies</text>
+  </g>
+
+  <g filter="url(#cardShadow)">
+    <rect x="636" y="40" width="516" height="350" rx="16" fill="#171A21" stroke="#282E3A" stroke-width="1.25"/>
+  </g>
+
+  <rect x="636" y="40" width="516" height="44" rx="16" fill="#1E222B"/>
+  <rect x="636" y="68" width="516" height="16" fill="#1E222B"/>
+  <line x1="636" y1="84" x2="1152" y2="84" stroke="#282E3A" stroke-width="1"/>
+  <circle cx="658" cy="62" r="5" fill="#F87171" opacity="0.75"/>
+  <circle cx="674" cy="62" r="5" fill="#FBBF24" opacity="0.75"/>
+  <circle cx="690" cy="62" r="5" fill="#34D399" opacity="0.75"/>
+  <text x="710" y="66" fill="#8B92A2" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11">illustrative commit · proof_commit.mjs</text>
+  <rect x="1002" y="50" width="134" height="24" rx="12" fill="#0F291E" stroke="#1E5941" stroke-width="1"/>
+  <text x="1069" y="66" text-anchor="middle" fill="#34D399" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5" font-weight="700">COMMIT_VERIFIED</text>
+
+  <text x="660" y="114" fill="#F4F3EF" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="12.5" font-weight="700">fix(validator): allow zero quantity in boundary check</text>
+  <text x="660" y="138" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12"><tspan font-weight="700" fill="#F4F3EF">Why:</tspan> Strict &gt; 0 rejected valid zero-delta orders; relax bound to &gt;= 0.</text>
+
+  <rect x="660" y="154" width="468" height="62" rx="10" fill="#2D1517" stroke="#69282D" stroke-width="1"/>
+  <text x="676" y="174" fill="#F87171" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="700">Before · Parent P + --overlay (os.tmpdir(), exit 1)</text>
+  <text x="676" y="194" fill="#F4F3EF" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11.5" xml:space="preserve">  | not ok 1 - accepts zero quantity</text>
+  <text x="676" y="209" fill="#8B92A2" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5">stdout slice [84, 116) · verbatim stream bytes</text>
+
+  <rect x="660" y="226" width="468" height="62" rx="10" fill="#0F291E" stroke="#1E5941" stroke-width="1"/>
+  <text x="676" y="246" fill="#34D399" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="700">After · Staged Tree T = git write-tree (exit 0)</text>
+  <text x="676" y="266" fill="#F4F3EF" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11.5" xml:space="preserve">  | ok 1 - accepts zero quantity</text>
+  <text x="676" y="281" fill="#8B92A2" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5">stdout slice [80, 108) · 0 skipped · privacy scan clean</text>
+
+  <rect x="660" y="300" width="468" height="36" rx="8" fill="#13213A" stroke="#284A80" stroke-width="1"/>
+  <text x="674" y="322" fill="#60A5FA" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.4" font-weight="600">UI-Evidence: route=/orders viewport=390x844 before=sha256:91e4a02c...</text>
+
+  <text x="660" y="366" fill="#8B92A2" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11">Evidence-ID: <tspan fill="#F4F3EF" font-weight="600">sha256:62d58715a31a5d2af20e62c0ab1c3804...</tspan></text>
+</svg>

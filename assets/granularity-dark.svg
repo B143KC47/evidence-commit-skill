@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="476" viewBox="0 0 1200 476" fill="none" role="img" aria-label="Four Granularity Gates — Agent rubric and CLI staging guards">
+  <rect x="1" y="1" width="1198" height="474" rx="22" fill="#0E1014" stroke="#282E3A" stroke-width="1.5"/>
+
+  <text x="44" y="48" fill="#E8845C" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11.5" font-weight="700" letter-spacing="0.08em">GRANULARITY RUBRIC (SKILL.MD) + EXPLICIT STAGING GUARD</text>
+  <text x="44" y="86" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="31" font-weight="400">When does a code change deserve <tspan font-style="italic" fill="#E8845C">one</tspan> commit?</text>
+  <text x="44" y="114" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="14.2">Every dirty working tree is evaluated against four engineering gates before invoking git commit:</text>
+
+  
+  <g transform="translate(44, 148)">
+    <rect x="0" y="0" width="266" height="236" rx="14" fill="#171A21" stroke="#282E3A" stroke-width="1.25"/>
+    <rect x="18" y="18" width="76" height="22" rx="6" fill="#2D1517" stroke="#69282D" stroke-width="1"/>
+    <text x="56" y="33" text-anchor="middle" fill="#F87171" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5" font-weight="700">GATE 01</text>
+    <text x="18" y="66" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="20" font-weight="400">Authority &amp; Green</text>
+    <text x="18" y="94" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">Do tests fail, debug code remain,</text>
+    <text x="18" y="112" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">or is commit consent missing?</text>
+    <line x1="18" y1="130" x2="248" y2="130" stroke="#282E3A" stroke-width="1"/>
+    <circle cx="24" cy="150" r="3" fill="#F87171"/>
+    <text x="34" y="154" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">Hold on failing checks or scratch</text>
+    <circle cx="24" cy="172" r="3" fill="#F87171"/>
+    <text x="34" y="176" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">Respect main &amp; pre-staged index</text>
+    <rect x="18" y="194" width="230" height="28" rx="8" fill="#2D1517" stroke="#69282D" stroke-width="1"/>
+    <text x="133" y="212" text-anchor="middle" fill="#F87171" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="700">HOLD · 0 COMMITS</text>
+  </g>
+
+  <g transform="translate(326, 148)">
+    <rect x="0" y="0" width="266" height="236" rx="14" fill="#171A21" stroke="#282E3A" stroke-width="1.25"/>
+    <rect x="18" y="18" width="76" height="22" rx="6" fill="#2B2010" stroke="#664B1F" stroke-width="1"/>
+    <text x="56" y="33" text-anchor="middle" fill="#FBBF24" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5" font-weight="700">GATE 02</text>
+    <text x="18" y="66" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="20" font-weight="400">Splitting (Tidy First)</text>
+    <text x="18" y="94" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">Does the diff mix structural edits</text>
+    <text x="18" y="112" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">with a behavioral code change?</text>
+    <line x1="18" y1="130" x2="248" y2="130" stroke="#282E3A" stroke-width="1"/>
+    <circle cx="24" cy="150" r="3" fill="#FBBF24"/>
+    <text x="34" y="154" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">1st: behavior-preserving refactor</text>
+    <circle cx="24" cy="172" r="3" fill="#FBBF24"/>
+    <text x="34" y="176" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">2nd: independently revertable fix</text>
+    <rect x="18" y="194" width="230" height="28" rx="8" fill="#2B2010" stroke="#664B1F" stroke-width="1"/>
+    <text x="133" y="212" text-anchor="middle" fill="#FBBF24" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="700">SPLIT · 2 COMMITS</text>
+  </g>
+
+  <g transform="translate(608, 148)">
+    <rect x="0" y="0" width="266" height="236" rx="14" fill="#171A21" stroke="#282E3A" stroke-width="1.25"/>
+    <rect x="18" y="18" width="76" height="22" rx="6" fill="#0F291E" stroke="#1E5941" stroke-width="1"/>
+    <text x="56" y="33" text-anchor="middle" fill="#34D399" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5" font-weight="700">GATE 03</text>
+    <text x="18" y="66" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="20" font-weight="400">Coalescing (Bisect)</text>
+    <text x="18" y="94" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">Do signature edits, callers, types,</text>
+    <text x="18" y="112" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">and tests form one contract?</text>
+    <line x1="18" y1="130" x2="248" y2="130" stroke="#282E3A" stroke-width="1"/>
+    <circle cx="24" cy="150" r="3" fill="#34D399"/>
+    <text x="34" y="154" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">No WIP → fix typo → add test</text>
+    <circle cx="24" cy="172" r="3" fill="#34D399"/>
+    <text x="34" y="176" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">Every commit passes git bisect</text>
+    <rect x="18" y="194" width="230" height="28" rx="8" fill="#0F291E" stroke="#1E5941" stroke-width="1"/>
+    <text x="133" y="212" text-anchor="middle" fill="#34D399" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="700">MERGE · 1 COMMIT</text>
+  </g>
+
+  <g transform="translate(890, 148)">
+    <rect x="0" y="0" width="266" height="236" rx="14" fill="#171A21" stroke="#282E3A" stroke-width="1.25"/>
+    <rect x="18" y="18" width="76" height="22" rx="6" fill="#13213A" stroke="#284A80" stroke-width="1"/>
+    <text x="56" y="33" text-anchor="middle" fill="#60A5FA" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="10.5" font-weight="700">GATE 04</text>
+    <text x="18" y="66" fill="#F4F3EF" font-family="Georgia, 'Times New Roman', serif" font-size="20" font-weight="400">Explicit Index (T)</text>
+    <text x="18" y="94" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">Are only exact repo-relative files</text>
+    <text x="18" y="112" fill="#B9BDC7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="12.2">staged via stage --files?</text>
+    <line x1="18" y1="130" x2="248" y2="130" stroke="#282E3A" stroke-width="1"/>
+    <circle cx="24" cy="150" r="3" fill="#60A5FA"/>
+    <text x="34" y="154" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">CLI blocks ., .., *, ? &amp; .env*</text>
+    <circle cx="24" cy="172" r="3" fill="#60A5FA"/>
+    <text x="34" y="176" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="11.8">Unrelated files stay unstaged</text>
+    <rect x="18" y="194" width="230" height="28" rx="8" fill="#13213A" stroke="#284A80" stroke-width="1"/>
+    <text x="133" y="212" text-anchor="middle" fill="#60A5FA" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" font-size="11" font-weight="700">FREEZE · TREE T</text>
+  </g>
+
+  <rect x="44" y="404" width="1112" height="48" rx="12" fill="#1E222B" stroke="#282E3A" stroke-width="1"/>
+  <text x="600" y="433" text-anchor="middle" fill="#F4F3EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="13.8" font-weight="600">
+    Core Criterion: <tspan font-weight="400" fill="#B9BDC7">One concrete acceptance condition + complete callers, types &amp; tests + verified staged tree </tspan><tspan font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas, monospace" fill="#E8845C">T</tspan><tspan font-weight="400" fill="#B9BDC7"> = One Atomic Commit.</tspan>
+  </text>
+</svg>
