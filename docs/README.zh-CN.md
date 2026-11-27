@@ -141,7 +141,7 @@ cp -R skills/evidence-commit ~/.claude/skills/evidence-commit
 假设已将技能安装至 `.agents/skills/evidence-commit` 并处于功能分支（如 `git switch -c fix/zero-quantity`）：
 
 ```bash
-# 1. 显式暂存仓库相对路径（硬性拦截 `.`、`..`、`*`、`?` 与 `.env*`）
+# 1. 显式暂存仓库相对路径（硬性拦截 `.`、`..`、`*`、`?`、`:` 与 `.env*`）
 node .agents/skills/evidence-commit/scripts/proof_commit.mjs stage \
   --files src/validator.mjs tests/validator.test.mjs
 
@@ -176,6 +176,13 @@ node .agents/skills/evidence-commit/scripts/proof_commit.mjs publish-pr \
   --title "fix(validator): allow zero quantity in boundary check"
 ```
 
+当且仅当变更**确实经过了独立审查模型审计**时（切勿虚构未执行的审查或将编写代码的主会话填作审查者），可在 `commit`（绑定进 `Evidence-ID` 作为不可篡改的自声明溯源记录）或 `publish-pr`（若使用 GitHub Enterprise 远端可附加 `--allow-custom-origin --repo host/owner/repo`，私有库 Cookie 鉴权附件可附加 `--allow-private-unverified-assets`）中附加 `--reviewed-by "<model> via <harness>"`：
+
+```bash
+--reviewed-by "claude-opus-5-5-high via Antigravity CLI" \
+--reviewed-by "gpt-6.2-astra (xhigh) via Codex CLI"
+```
+
 当提交涉及前端界面改动（`--type ui` 或修改组件/样式文件，除非通过 `--no-ui-impact` 声明无视觉变化，否则强制要求视觉证据）时，在 `commit` 前附加 `Before | After` 截图：
 
 ```bash
@@ -195,7 +202,7 @@ node .agents/skills/evidence-commit/scripts/proof_commit.mjs attach-ui \
 - **空跑与跳过测试拦截**：在提交审核阶段自动识别并拒绝 `# pass 0`、`ℹ pass 0`、`0 passed` 或所选引文仅包含 `SKIP` / `TODO` 的假阳性结果。
 - **原始字节区间零篡改引文**：每一行 `  | <line>` 均精确对应原始输出流字节偏移 `[start_byte, end_byte)`，严禁 `.trim()` 或人工改写；包含 ANSI 控制码（`\x1b`）或裸回车覆盖（`\r`）的输出一律硬性拦截。
 - **本地路径与高危凭据扫描**：提交与发 PR 前自动扫描公开文本中的 `os.homedir()` 本地路径及高危密钥格式（`ghp_`、`gho_`、`github_pat_`、`sk-`、`AKIA`、`Bearer`、PEM 私钥头），隐私扫描器的报错诊断绝不回显匹配到的敏感明文。
-- **PNG 结构校验与 GitHub PR 回读核验**：校验 PNG 魔数、`IHDR` 正宽高、Chunk CRC32 校验和（`zlib.crc32`）与 `zlib` IDAT 解压流并绑定 SHA-256 摘要；通过 `gh --attach` 上传摘要命名截图、保留 PR 正文中人工撰写的备注，并在发布后回读远端 PR 核验 `headRefOid`、`baseRefName`、报告正文及预期 `https://` 图片引用。
+- **PNG 结构校验与 GitHub PR 回读核验**：校验 PNG 魔数、`IHDR` 正宽高、Chunk CRC32 校验和（`zlib.crc32`）与受限 `zlib` IDAT 解压流并绑定 SHA-256 摘要；通过 `gh --attach` 上传摘要命名截图、保留 PR 正文中人工撰写的备注，并在发布后回读远端 PR 核验同仓 `OPEN` 状态、`headRefOid`、`baseRefName`、`baseRefOid` 提交范围一致性、报告正文及 SHA-256 字节级核验通过的 `https://` 图片附件。
 
 ---
 

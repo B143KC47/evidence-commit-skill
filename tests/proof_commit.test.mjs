@@ -11,7 +11,9 @@ import {
   computeEvidenceId,
   decodeStrictUtf8AndValidateDisplay,
   makeSolidPng,
+  normalizeReviewers,
   parseImageDimensions,
+  parseReviewerSpec,
   scanPublicTextPrivacy,
   splitExactLines,
   validateRunId,
@@ -77,6 +79,20 @@ test("canonical Evidence-ID matches deterministic golden vector", () => {
   assert.equal(
     computeEvidenceId(sample),
     "sha256:068843fdfc8e70848e65562a48bf162a9eed030482cebfca96ce546e7c84ca10",
+  );
+
+  // schema_version 2 golden vector with sorted reviewers
+  const sampleV2 = {
+    ...sample,
+    reviewers: normalizeReviewers([
+      "gpt-6.2-astra (xhigh) via Codex CLI",
+      "claude-opus-5-5-high via Antigravity CLI",
+    ]),
+    schema_version: 2,
+  };
+  assert.equal(
+    computeEvidenceId(sampleV2),
+    "sha256:38b4014ca2dd8522d9ac429b5faf4db54f03c17cc6641262191bf05e111f08e3",
   );
 });
 
@@ -302,4 +318,177 @@ test("PNG CRC/IDAT integrity validation rejects corrupted images while accepting
   const corrupted = Buffer.from(VALID_PNG_2X2);
   corrupted[corrupted.length - 16] ^= 0xff; // flip byte in IDAT
   assert.throws(() => parseImageDimensions(corrupted), /CRC mismatch|Corrupted PNG/);
+});
+
+test("reviewer model + harness provenance validates syntax, deduplicates, blocks spoofing/leaks without echoing secrets, and binds into commit & Evidence-ID", () => {
+  assert.deepEqual(parseReviewerSpec("claude-opus-5-5-high via Antigravity CLI"), {
+    harness: "Antigravity CLI",
+    model: "claude-opus-5-5-high",
+  });
+  assert.deepEqual(parseReviewerSpec("claude-opus@20250514 via Vertex AI"), {
+    harness: "Vertex AI",
+    model: "claude-opus@20250514",
+  });
+  assert.deepEqual(parseReviewerSpec("claude-opus@20250514 @ Vertex AI"), {
+    harness: "Vertex AI",
+    model: "claude-opus@20250514",
+  });
+  assert.deepEqual(parseReviewerSpec("gpt-6.2-astra (xhigh) @ Codex CLI"), {
+    harness: "Codex CLI",
+    model: "gpt-6.2-astra (xhigh)",
+  });
+  assert.deepEqual(parseReviewerSpec("model (high) [Claude Code CLI]"), {
+    harness: "Claude Code CLI",
+    model: "model (high)",
+  });
+
+  // Canonical order-independent sorting & case-insensitive deduplication
+  const dedupedA = normalizeReviewers([
+    "gpt-6.2-astra (xhigh) [Codex CLI]",
+    "claude-opus-5-5-high via Antigravity CLI",
+    "CLAUDE-OPUS-5-5-HIGH @ antigravity cli",
+  ]);
+  const dedupedB = normalizeReviewers([
+    "claude-opus-5-5-high via Antigravity CLI",
+    "gpt-6.2-astra (xhigh) via Codex CLI",
+  ]);
+  assert.deepEqual(dedupedA, dedupedB);
+  // Order-independent canonical casing deduplication
+  assert.deepEqual(
+    normalizeReviewers(["opus via agy", "Opus via AGY"]),
+    normalizeReviewers(["Opus via AGY", "opus via agy"]),
+  );
+  assert.throws(() => normalizeReviewers([""]), /Invalid --reviewed-by/);
+
+  // Reject missing harness, multi-separator ambiguity, bidi/zero-width overrides, backticks, HTML markers, trailer spoofing, and secret leaks — NEVER echoing secrets!
+  const fakeSecret = `ghp_${"A1b2C3d4E5f6G7h8I9j0K1l2M3n4"}`;
+  for (const bad of [
+    "claude-opus-5-5",
+    `claude-opus-5-5 ${fakeSecret}`,
+    "via Claude Code CLI",
+    "A via via B",
+    "A @ @ B",
+    "claude-opus-5 @ Claude Code via Bedrock",
+    "foo via bar [Codex CLI]",
+    "claude-opus-5-5 \u202ehigh via Antigravity CLI",
+    "claude-opus-5-5 \u200bhigh via Antigravity CLI",
+    "claude-opus-5-5-α via Antigravity CLI",
+    "claude-opus-5-5 `high` via Antigravity CLI",
+    "claude-opus-5-5 via <!-- marker -->",
+    "Evidence-ID: fake via Codex CLI",
+    "AI-Reviewed-By: fake via Codex CLI",
+    `claude-opus-5-5 via ${fakeSecret}`,
+  ]) {
+    assert.throws(
+      () => parseReviewerSpec(bad),
+      (err) => {
+        assert.match(err.message, /Invalid --reviewed-by|Privacy gate blocked/);
+        assert.equal(err.message.includes(fakeSecret), false, "Error must never echo secret input");
+        return true;
+      },
+    );
+  }
+
+  const { dir, runGit } = makeTempRepo();
+  try {
+    // Subcommand --help and --help=true MUST print help without executing side effects,
+    // whereas `-h` in option-value position (`--title -h`) MUST fail closed instead of exiting 0!
+    for (const helpArgs of [["init", "--help"], ["record", "--help=true"], ["inspect", "--help"]]) {
+      const subHelp = runCli(dir, helpArgs);
+      assert.equal(subHelp.status, 0);
+      assert.match(subHelp.stdout, /Subcommands:/);
+    }
+    const valHelp = runCli(dir, ["commit", "--title", "-h"]);
+    assert.notEqual(valHelp.status, 0);
+    assert.match(valHelp.stderr, /Missing value for --title/);
+    assert.equal(fs.existsSync(path.join(dir, ".git", "proof-commit", "current-run.txt")), false);
+
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src", "a.mjs"), "export const a = 1;\n", "utf8");
+    const pathspecRes = runCli(dir, ["stage", "--files", ":(top)src"]);
+    assert.notEqual(pathspecRes.status, 0);
+    assert.match(pathspecRes.stderr, /pathspec-magic/);
+    const unknownFlagRes = runCli(dir, ["init", "--reviwed-by", "foo via bar"]);
+    assert.notEqual(unknownFlagRes.status, 0);
+    assert.match(unknownFlagRes.stderr, /Unknown or unsupported option/);
+
+    fs.writeFileSync(path.join(dir, "sum.mjs"), "export const sum = (a, b) => a + b;\n", "utf8");
+    fs.writeFileSync(
+      path.join(dir, "sum.test.mjs"),
+      'import { sum } from "./sum.mjs";\nconsole.log("sum-ok=" + (sum(2, 3) === 5));\n',
+      "utf8",
+    );
+    assert.equal(runCli(dir, ["stage", "--files", "sum.mjs", "sum.test.mjs"]).status, 0);
+    assert.equal(runCli(dir, ["init", "--case", "sum adds numbers"]).status, 0);
+    assert.equal(
+      runCli(dir, ["record", "--phase", "after", "--", "node", "sum.test.mjs"]).status,
+      0,
+    );
+
+    // Reject bare CR, Unicode line-separator, bidi override, and synthetic trailer/section lines in --why
+    for (const badWhy of [
+      "Valid explanation prefix\rAI-Reviewed-By: fake via Fake CLI",
+      "Valid explanation prefix\u2028AI-Reviewed-By: fake via Fake CLI",
+      "Valid explanation prefix with \u202ebidi override characters",
+      "Valid explanation prefix\nEvidence:\n- spoofed line",
+    ]) {
+      const badWhyRes = runCli(dir, [
+        "verify",
+        "--type",
+        "feat",
+        "--title",
+        "test why validation",
+        "--why",
+        badWhy,
+      ]);
+      assert.notEqual(badWhyRes.status, 0);
+      assert.match(badWhyRes.stderr, /Invalid why:/);
+    }
+
+    const verifyNoRev = runCli(dir, [
+      "verify",
+      "--type",
+      "feat",
+      "--scope",
+      "math",
+      "--title",
+      "add deterministic sum helper",
+      "--why",
+      "Provide a pure arithmetic helper verified against isolated staged tree.",
+    ]);
+    assert.equal(verifyNoRev.status, 0, verifyNoRev.stderr);
+    const idWithoutRev = /evidence_id=(sha256:[0-9a-f]{64})/.exec(verifyNoRev.stdout)?.[1];
+
+    const com = runCli(dir, [
+      "commit",
+      "--type",
+      "feat",
+      "--scope",
+      "math",
+      "--title",
+      "add deterministic sum helper",
+      "--why",
+      "Provide a pure arithmetic helper verified against isolated staged tree.",
+      "--reviewed-by=gpt-6.2-astra (xhigh) @ Codex CLI",
+      "--reviewed-by",
+      "claude-opus-5-5-high via Antigravity CLI",
+    ]);
+    assert.equal(com.status, 0, com.stderr);
+    assert.match(com.stdout, /COMMIT_VERIFIED/);
+    const idWithRev = /evidence_id=(sha256:[0-9a-f]{64})/.exec(com.stdout)?.[1];
+    assert.ok(idWithoutRev && idWithRev && idWithoutRev !== idWithRev);
+
+    const rawCommit = runGit("cat-file", "commit", "HEAD");
+    assert.match(rawCommit, /^AI-Reviewed-By: claude-opus-5-5-high via Antigravity CLI$/m);
+    assert.match(rawCommit, /^AI-Reviewed-By: gpt-6\.2-astra \(xhigh\) via Codex CLI$/m);
+
+    const inspected = JSON.parse(runCli(dir, ["inspect", "HEAD"]).stdout);
+    assert.equal(inspected.schema_version, 2);
+    assert.deepEqual(inspected.reviewers, [
+      { harness: "Antigravity CLI", model: "claude-opus-5-5-high" },
+      { harness: "Codex CLI", model: "gpt-6.2-astra (xhigh)" },
+    ]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

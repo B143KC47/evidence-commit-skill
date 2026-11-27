@@ -69,6 +69,274 @@ export function validateRunId(runId) {
   return runId;
 }
 
+const FORBIDDEN_DISPLAY_CTRL_RE =
+  /[\x00-\x1f\x7f-\x9f\r\n\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]/u;
+const FORBIDDEN_MULTILINE_CTRL_RE =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\r\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]/u;
+const RESERVED_TRAILER_LINE_RE =
+  /(?:^|\n)\s*(?:Evidence-ID|UI-Evidence|UI-Impact|AI-Reviewed-By):/i;
+const RESERVED_SECTION_LINE_RE = /(?:^|\n)\s*(?:Why|Granularity|Evidence):\s*(?:\n|$)/i;
+const RESERVED_TRAILER_START_RE =
+  /^\s*(?:Evidence-ID|UI-Evidence|UI-Impact|AI-Reviewed-By):/i;
+const RESERVED_TRAILER_INLINE_RE =
+  /(?:^|\s)(?:Evidence-ID|UI-Evidence|UI-Impact|AI-Reviewed-By):/i;
+const RESERVED_SUMMARY_KEYWORD_RE =
+  /(?:Evidence-?ID|UI-?Evidence|UI-?Impact|AI-?Reviewed-?By|Verification\s+Evidence)/i;
+const EVIDENCE_ID_RE = /^sha256:[0-9a-f]{64}$/;
+const ALLOWED_UI_EXTS = new Set(["png", "jpg", "webp"]);
+const MAX_REVIEWERS = 16;
+const TRUSTED_HOSTED_ASSET_URL_RE =
+  /^https:\/\/(?:github\.com\/user-attachments\/assets\/[0-9A-Za-z._-]+|(?:private-)?user-images\.githubusercontent\.com\/[0-9]+\/[0-9A-Za-z._-]+)$/;
+const ALLOWED_ASSET_FETCH_HOST_RE =
+  /^(?:github\.com|(?:[a-z0-9-]+\.)*githubusercontent\.com|(?:[a-z0-9-]+\.)*amazonaws\.com)$/i;
+
+function collapseInlineWhitespace(text) {
+  return String(text ?? "")
+    .replace(/[\s\u2028\u2029]+/g, " ")
+    .trim();
+}
+
+function safeInlineCode(text) {
+  const str = String(text ?? "");
+  if (str.length === 0) return "";
+  let maxTicks = 0;
+  for (const m of str.matchAll(/`+/g)) {
+    if (m[0].length > maxTicks) maxTicks = m[0].length;
+  }
+  const delim = "`".repeat(maxTicks + 1);
+  const pad = str.startsWith("`") || str.endsWith("`") || str.startsWith(" ") || str.endsWith(" ") ? " " : "";
+  return `${delim}${pad}${str}${pad}${delim}`;
+}
+
+function canonicalizeSummaryForSpoofCheck(text) {
+  return String(text ?? "")
+    .normalize("NFKC")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&#(\d{1,7});/g, (_, dec) => {
+      const cp = Number(dec);
+      return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : "";
+    })
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, hex) => {
+      const cp = Number.parseInt(hex, 16);
+      return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : "";
+    })
+    .replace(/&shy;/gi, "")
+    .replace(/&colon;/gi, ":")
+    .replace(/&(?:ndash|mdash|minus|hyphen|dash);/gi, "-")
+    .replace(/[\u2010-\u2015\u2212\ufe58\ufe63\uff0d]/g, "-")
+    .replace(/[\p{Cf}\p{Cc}*_~`\\]/gu, "");
+}
+
+function assertMultilineAuthorField(rawVal, fieldLabel, maxLen = 4000) {
+  const normalized = String(rawVal ?? "").replace(/\r\n/g, "\n");
+  if (FORBIDDEN_MULTILINE_CTRL_RE.test(normalized)) {
+    throw new Error(
+      `Invalid ${fieldLabel}: contains bare CR, control, zero-width, line-separator, or Unicode bidi characters.`,
+    );
+  }
+  const trimmed = normalized.trim();
+  if (trimmed.length > maxLen) {
+    throw new Error(`Invalid ${fieldLabel}: exceeds ${maxLen} characters (${trimmed.length}).`);
+  }
+  if (RESERVED_TRAILER_LINE_RE.test(trimmed) || RESERVED_SECTION_LINE_RE.test(trimmed)) {
+    throw new Error(
+      `Invalid ${fieldLabel}: must not inject synthetic section headers (\`Why:\`, \`Granularity:\`, \`Evidence:\`) or commit trailers (\`Evidence-ID:\`, \`UI-Evidence:\`, \`UI-Impact:\`, \`AI-Reviewed-By:\`).`,
+    );
+  }
+  return trimmed;
+}
+
+function assertPrSummaryText(rawVal) {
+  const normalized = String(rawVal ?? "").replace(/\r\n/g, "\n");
+  if (FORBIDDEN_MULTILINE_CTRL_RE.test(normalized)) {
+    throw new Error(
+      "Invalid summary: contains bare CR, control, zero-width, line-separator, or Unicode bidi characters.",
+    );
+  }
+  const trimmed = normalized.trim();
+  if (trimmed.length > 8000) {
+    throw new Error(`Invalid summary: exceeds 8000 characters (${trimmed.length}).`);
+  }
+  if (
+    trimmed.includes("<!-- evidence-commit-report:start -->") ||
+    trimmed.includes("<!-- evidence-commit-report:end -->")
+  ) {
+    throw new Error("Invalid summary: must not contain evidence-commit report boundary markers.");
+  }
+  const skeleton = canonicalizeSummaryForSpoofCheck(trimmed);
+  if (RESERVED_SUMMARY_KEYWORD_RE.test(skeleton)) {
+    throw new Error(
+      "Invalid summary: must not include reserved attribution keywords (AI-Reviewed-By / Evidence-ID / Verification Evidence); pass --reviewed-by to record reviewers.",
+    );
+  }
+  return trimmed;
+}
+
+function assertValidEvidenceIdFormat(id, label = "Evidence-ID") {
+  if (typeof id !== "string" || !EVIDENCE_ID_RE.test(id)) {
+    throw new Error(`Invalid ${label}: expected "sha256:<64 lowercase hex chars>".`);
+  }
+  return id;
+}
+
+function assertPositiveIntFlag(rawVal, flagName, maxVal = 1_000_000_000) {
+  const str = String(rawVal ?? "").trim();
+  if (!/^[1-9]\d{0,8}$/.test(str)) {
+    throw new Error(`Invalid --${flagName}: expected a positive base-10 integer.`);
+  }
+  const n = Number(str);
+  if (!Number.isSafeInteger(n) || n <= 0 || n > maxVal) {
+    throw new Error(`Invalid --${flagName}: must be between 1 and ${maxVal}.`);
+  }
+  return n;
+}
+
+function assertSingleLineStructuralField(rawVal, fieldLabel, maxLen = 240) {
+  const str = String(rawVal ?? "");
+  if (FORBIDDEN_DISPLAY_CTRL_RE.test(str)) {
+    throw new Error(
+      `Invalid ${fieldLabel}: contains newline, control, zero-width, or Unicode bidi characters.`,
+    );
+  }
+  const trimmed = str.trim();
+  if (trimmed.length > maxLen) {
+    throw new Error(`Invalid ${fieldLabel}: exceeds ${maxLen} characters (${trimmed.length}).`);
+  }
+  if (RESERVED_TRAILER_START_RE.test(trimmed)) {
+    throw new Error(`Invalid ${fieldLabel}: must not start with a reserved commit trailer keyword.`);
+  }
+  return trimmed;
+}
+
+function cleanReviewerToken(val, fieldLabel) {
+  const rawStr = String(val ?? "");
+  if (FORBIDDEN_DISPLAY_CTRL_RE.test(rawStr)) {
+    throw new Error(
+      `Invalid --reviewed-by ${fieldLabel}: contains control, newline, zero-width, or Unicode bidi characters. Expected "<model> via <harness>".`,
+    );
+  }
+  const cleaned = rawStr.replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    throw new Error(
+      `Invalid --reviewed-by: missing ${fieldLabel}. Expected "<model> via <harness>", "<model> @ <harness>", or "<model> [<harness>]".`,
+    );
+  }
+  if (!/^[\x20-\x7e]+$/.test(cleaned)) {
+    throw new Error(
+      `Invalid --reviewed-by: ${fieldLabel} must use printable ASCII characters only.`,
+    );
+  }
+  if (cleaned.length > 80) {
+    throw new Error(
+      `Invalid --reviewed-by: ${fieldLabel} exceeds 80 characters (${cleaned.length}). Keep model and harness concise.`,
+    );
+  }
+  if (/[`|\[\]]/.test(cleaned) || cleaned.includes("<!--") || cleaned.includes("-->")) {
+    throw new Error(
+      `Invalid --reviewed-by: ${fieldLabel} contains forbidden backtick, pipe, bracket, or HTML comment marker characters.`,
+    );
+  }
+  if (/(?:^|\s)(?:via|@)(?:\s|$)/i.test(cleaned)) {
+    throw new Error(
+      `Invalid --reviewed-by: ${fieldLabel} contains ambiguous separator tokens ("via" or "@"); pass one "<model> via <harness>" pair per item.`,
+    );
+  }
+  if (RESERVED_TRAILER_INLINE_RE.test(cleaned)) {
+    throw new Error(
+      `Invalid --reviewed-by: ${fieldLabel} must not contain reserved commit trailer keywords.`,
+    );
+  }
+  scanPublicTextPrivacy(cleaned, `reviewed_by_${fieldLabel}`);
+  return cleaned;
+}
+
+export function parseReviewerSpec(rawSpec) {
+  const rawStr = String(rawSpec ?? "");
+  if (FORBIDDEN_DISPLAY_CTRL_RE.test(rawStr)) {
+    throw new Error(
+      'Invalid --reviewed-by: contains control, newline, zero-width, or Unicode bidi characters. Expected "<model> via <harness>".',
+    );
+  }
+  const trimmed = rawStr.trim();
+  if (!trimmed) {
+    throw new Error(
+      'Invalid --reviewed-by: value cannot be empty. Expected "<model> via <harness>", "<model> @ <harness>", or "<model> [<harness>]".',
+    );
+  }
+  let modelRaw = null;
+  let harnessRaw = null;
+
+  const bracketMatch = /^([^\][]+?)\s*\[([^\][]+)\]$/.exec(trimmed);
+  const viaMatch = /^(.+?)\s+via\s+(.+)$/i.exec(trimmed);
+  const atMatch = /^(.+?)\s+@\s+(.+)$/.exec(trimmed);
+
+  if (bracketMatch) {
+    [, modelRaw, harnessRaw] = bracketMatch;
+  } else if (viaMatch) {
+    [, modelRaw, harnessRaw] = viaMatch;
+  } else if (atMatch) {
+    [, modelRaw, harnessRaw] = atMatch;
+  } else {
+    scanPublicTextPrivacy(trimmed, "reviewed_by_spec");
+    throw new Error(
+      'Invalid --reviewed-by syntax: must specify both model and harness using "<model> via <harness>", "<model> @ <harness>", or "<model> [<harness>]".',
+    );
+  }
+
+  return {
+    harness: cleanReviewerToken(harnessRaw, "harness"),
+    model: cleanReviewerToken(modelRaw, "model"),
+  };
+}
+
+export function normalizeReviewers(entries = []) {
+  if (!Array.isArray(entries)) {
+    throw new Error("Invalid reviewers collection: expected an array.");
+  }
+  const parsedList = entries.map((item) => {
+    if (item === null || item === undefined) {
+      throw new Error("Invalid --reviewed-by: reviewer entry cannot be null or empty.");
+    }
+    if (typeof item === "string") return parseReviewerSpec(item);
+    if (typeof item === "object" && !Array.isArray(item)) {
+      return {
+        harness: cleanReviewerToken(item.harness, "harness"),
+        model: cleanReviewerToken(item.model, "model"),
+      };
+    }
+    throw new Error("Invalid reviewer entry type.");
+  });
+  const caseRank = (s) =>
+    s.replace(/[A-Za-z]/g, (ch) => (ch >= "a" && ch <= "z" ? `0${ch}` : `1${ch}`));
+  parsedList.sort((a, b) => {
+    const ka = `${a.model.toLowerCase()}\0${a.harness.toLowerCase()}\0${caseRank(a.model)}\0${caseRank(a.harness)}`;
+    const kb = `${b.model.toLowerCase()}\0${b.harness.toLowerCase()}\0${caseRank(b.model)}\0${caseRank(b.harness)}`;
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+  const deduped = [];
+  const seen = new Set();
+  for (const parsed of parsedList) {
+    const key = `${parsed.model.toLowerCase()}\0${parsed.harness.toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(parsed);
+    }
+  }
+  if (deduped.length > MAX_REVIEWERS) {
+    throw new Error(`Too many --reviewed-by entries (${deduped.length}); maximum is ${MAX_REVIEWERS}.`);
+  }
+  return deduped;
+}
+
+function formatReviewerTrailer(r) {
+  return `AI-Reviewed-By: ${r.model} via ${r.harness}`;
+}
+
+function formatReviewerMarkdown(r) {
+  return `\`${r.model}\` via \`${r.harness}\``;
+}
+
 function fail(msg, code = 1) {
   process.stderr.write(`ERROR: ${msg}\n`);
   process.exit(code);
@@ -105,9 +373,9 @@ function splitNul(str) {
 
 function listStagedPaths(repoRoot, parentOid) {
   const out = parentOid
-    ? git(repoRoot, ["diff", "--cached", "--name-only", "-z"]).stdout
+    ? git(repoRoot, ["diff", "--cached", "--no-renames", "--name-only", "-z"]).stdout
     : git(repoRoot, ["ls-files", "--cached", "-z"]).stdout;
-  return splitNul(out);
+  return [...new Set(splitNul(out))];
 }
 
 function listLsTreeEntries(repoRoot, treeish) {
@@ -164,11 +432,12 @@ function normalizeRepoRelPath(rawPath) {
     rawPath === "." ||
     rawPath === "-A" ||
     rawPath === "--all" ||
+    rawPath.startsWith(":") ||
     rawPath.includes("*") ||
     rawPath.includes("?")
   ) {
     throw new Error(
-      `Wildcard or whole-tree staging ("${rawPath}") is forbidden; list explicit file paths.`,
+      "Wildcard, pathspec-magic, or whole-tree staging is forbidden; list explicit repository-relative file paths.",
     );
   }
   if (path.isAbsolute(rawPath) || /^[A-Za-z]:/.test(rawPath)) {
@@ -348,7 +617,13 @@ function validatePngStructure(buf) {
   if (!sawIhdr || !sawIend || idatParts.length === 0) {
     throw new Error("Incomplete PNG stream (missing IHDR, IDAT, or IEND).");
   }
-  const inflated = zlib.inflateSync(Buffer.concat(idatParts));
+  const maxExpectedIdatBytes = Math.min(
+    256 * 1024 * 1024,
+    Math.max(65536, height * (1 + width * 8) * 2),
+  );
+  const inflated = zlib.inflateSync(Buffer.concat(idatParts), {
+    maxOutputLength: maxExpectedIdatBytes,
+  });
   if (inflated.length < height) {
     throw new Error("Corrupted PNG: decompressed IDAT payload is smaller than image height.");
   }
@@ -437,17 +712,28 @@ export function parseImageDimensions(buf) {
     }
   }
   if (
-    buf.length >= 30 &&
+    buf.length >= 21 &&
     buf.toString("ascii", 0, 4) === "RIFF" &&
     buf.toString("ascii", 8, 12) === "WEBP"
   ) {
     const chunk = buf.toString("ascii", 12, 16);
-    if (chunk === "VP8X") {
+    if (chunk === "VP8X" && buf.length >= 30) {
       return {
         format: "webp",
         width: 1 + buf.readUIntLE(24, 3),
         height: 1 + buf.readUIntLE(27, 3),
       };
+    }
+    if (chunk === "VP8 " && buf.length >= 30 && buf[23] === 0x9d && buf[24] === 0x01 && buf[25] === 0x2a) {
+      const width = buf.readUInt16LE(26) & 0x3fff;
+      const height = buf.readUInt16LE(28) & 0x3fff;
+      if (width > 0 && height > 0) return { format: "webp", width, height };
+    }
+    if (chunk === "VP8L" && buf.length >= 25 && buf[20] === 0x2f) {
+      const bits = buf.readUInt32LE(21);
+      const width = (bits & 0x3fff) + 1;
+      const height = ((bits >> 14) & 0x3fff) + 1;
+      if (width > 0 && height > 0) return { format: "webp", width, height };
     }
   }
   throw new Error("Unsupported or corrupted image file (expected valid, decodable PNG, JPEG, or WebP).");
@@ -635,6 +921,14 @@ function runCommandCapture(argv, cwd, timeoutMs = 300000) {
     });
     child.on("error", (err) => {
       clearTimeout(timer);
+      if (process.platform === "win32" && err?.code === "ENOENT" && /^(npm|npx|pnpm|yarn)$/i.test(exe)) {
+        reject(
+          new Error(
+            `spawn ${exe} ENOENT on Windows (shell=false does not resolve .cmd shims); invoke \`node <script>\` directly (e.g. \`node --test\`).`,
+          ),
+        );
+        return;
+      }
       reject(err);
     });
     child.on("close", (code, signal) => {
@@ -758,9 +1052,12 @@ function assertNotSkippedOrZeroTests(allLines, quotes, phaseLabel) {
   const fullText = allLines.map((l) => l.text).join("\n");
   if (
     /^(?:#|ℹ|i)\s*pass\s+0$/im.test(fullText) ||
-    /\b0\s+passed\b/i.test(fullText) ||
+    /^(?:#|ℹ|i)\s*tests\s+0$/im.test(fullText) ||
+    /\b0\s+pass(?:ed|ing)\b/i.test(fullText) ||
     /\bran\s+0\s+tests\b/i.test(fullText) ||
-    /\bno\s+tests\s+found\b/i.test(fullText)
+    /\bno\s+tests?\s+(?:files?\s+)?found\b/i.test(fullText) ||
+    /\[no\s+tests\s+to\s+run\]/i.test(fullText) ||
+    /\bcollected\s+0\s+items\b/i.test(fullText)
   ) {
     throw new Error(
       `${phaseLabel} output indicates zero passing tests executed; skipped or empty test runs cannot certify a commit.`,
@@ -786,9 +1083,105 @@ function formatDisplayCmd(argv) {
     .join(" ");
 }
 
-function parseFlags(argv) {
+const SUBCOMMAND_FLAGS = {
+  "attach-ui": new Set([
+    "after",
+    "before",
+    "new-surface-reason",
+    "notes",
+    "route",
+    "run-id",
+    "theme",
+    "viewport",
+  ]),
+  commit: new Set([
+    "allow-different-probe-cmd",
+    "case",
+    "granularity",
+    "max-lines",
+    "no-ui-impact",
+    "pick-after",
+    "pick-before",
+    "reviewed-by",
+    "run-id",
+    "scope",
+    "title",
+    "type",
+    "why",
+    "why-file",
+  ]),
+  init: new Set(["case", "mode", "run-id"]),
+  "publish-pr": new Set([
+    "allow-custom-origin",
+    "allow-partial-commits",
+    "allow-private-unverified-assets",
+    "base",
+    "clear-reviewers",
+    "closes",
+    "draft",
+    "gh-bin",
+    "repo",
+    "reviewed-by",
+    "skip-push-check",
+    "summary",
+    "title",
+  ]),
+  record: new Set(["mode", "overlay", "phase", "run-id", "timeout-ms"]),
+  stage: new Set(["files", "reset-index"]),
+  verify: new Set([
+    "allow-different-probe-cmd",
+    "case",
+    "granularity",
+    "max-lines",
+    "no-ui-impact",
+    "pick-after",
+    "pick-before",
+    "reviewed-by",
+    "run-id",
+    "scope",
+    "title",
+    "type",
+    "why",
+    "why-file",
+  ]),
+};
+
+function parseFlags(argv, subcommand = null) {
   const flags = {};
-  const multi = { files: [], overlay: [] };
+  const multi = { files: [], overlay: [], "reviewed-by": [] };
+  const boolFlags = new Set([
+    "reset-index",
+    "help",
+    "h",
+    "draft",
+    "allow-custom-origin",
+    "allow-partial-commits",
+    "allow-private-unverified-assets",
+    "skip-push-check",
+    "clear-reviewers",
+    "allow-different-probe-cmd",
+  ]);
+  const allowedSet = subcommand ? SUBCOMMAND_FLAGS[subcommand] : null;
+  const checkAllowedKey = (k) => {
+    if (allowedSet && !allowedSet.has(k) && k !== "help" && k !== "h") {
+      throw new Error(`Unknown or unsupported option "--${k}" for subcommand "${subcommand}".`);
+    }
+  };
+  const preDash = argv.includes("--") ? argv.slice(0, argv.indexOf("--")) : argv;
+  for (let hIdx = 0; hIdx < preDash.length; hIdx++) {
+    const tok = preDash[hIdx];
+    const prev = hIdx > 0 ? preDash[hIdx - 1] : null;
+    const prevConsumesValue =
+      prev &&
+      prev.startsWith("--") &&
+      !prev.includes("=") &&
+      !boolFlags.has(prev.slice(2));
+    if (!prevConsumesValue && (tok === "-h" || tok === "--help" || tok === "--help=true")) {
+      printHelp();
+      process.exit(0);
+    }
+  }
+
   let cmdAfterDashDash = null;
 
   for (let i = 0; i < argv.length; i++) {
@@ -797,26 +1190,48 @@ function parseFlags(argv) {
       cmdAfterDashDash = argv.slice(i + 1);
       break;
     }
-    if (arg === "--files" || arg === "--overlay") {
+    if (arg.startsWith("--") && arg.includes("=")) {
+      const eqIdx = arg.indexOf("=");
+      const key = arg.slice(2, eqIdx);
+      const val = arg.slice(eqIdx + 1);
+      checkAllowedKey(key);
+      if (key === "files" || key === "overlay" || key === "reviewed-by") {
+        multi[key].push(val);
+      } else if (boolFlags.has(key)) {
+        if (val !== "true" && val !== "false") {
+          throw new Error(`Boolean flag --${key} only accepts true or false when given '='.`);
+        }
+        flags[key] = val === "true";
+      } else {
+        flags[key] = val;
+      }
+      continue;
+    }
+    if (arg === "--files" || arg === "--overlay" || arg === "--reviewed-by") {
       const key = arg.slice(2);
-      while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+      checkAllowedKey(key);
+      const startLen = multi[key].length;
+      while (i + 1 < argv.length && !argv[i + 1].startsWith("--") && argv[i + 1] !== "-h") {
         multi[key].push(argv[++i]);
       }
-    } else if (
-      arg === "--reset-index" ||
-      arg === "--help" ||
-      arg === "-h" ||
-      arg === "--draft" ||
-      arg === "--allow-partial-commits" ||
-      arg === "--skip-push-check"
-    ) {
-      flags[arg.replace(/^-+/, "")] = true;
+      if (multi[key].length === startLen) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+    } else if (arg.startsWith("--") && boolFlags.has(arg.slice(2))) {
+      const key = arg.slice(2);
+      checkAllowedKey(key);
+      flags[key] = true;
     } else if (arg.startsWith("--")) {
       const key = arg.slice(2);
-      if (i + 1 >= argv.length) throw new Error(`Missing value for ${arg}`);
+      checkAllowedKey(key);
+      if (i + 1 >= argv.length || argv[i + 1].startsWith("--") || argv[i + 1] === "-h") {
+        throw new Error(`Missing value for ${arg}`);
+      }
       flags[key] = argv[++i];
     } else {
-      throw new Error(`Unexpected positional argument "${arg}".`);
+      throw new Error(
+        `Unexpected positional argument at position ${i + 1} (did you forget quotes around an option value or "--" before the command?).`,
+      );
     }
   }
   return { flags, multi, cmdAfterDashDash };
@@ -828,11 +1243,11 @@ function printHelp() {
 Subcommands:
   stage       --files <relpath...> [--reset-index]
   init        [--case "<acceptance condition>"] [--mode snapshot|workspace] [--run-id <id>]
-  record      --phase before|after [--overlay <test-relpath...>] [--mode snapshot|workspace] -- <exe> [args...]
-  attach-ui   [--before <imgPath>] --after <imgPath> --route <route> --viewport <WxH> [--notes "<text>"]
-  verify      --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [...]
-  commit      --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [...]
-  publish-pr  [--base <branch>] [--title "<title>"] [--summary "<text>"] [--closes <n>] [--draft]
+  record      --phase before|after [--overlay <test-relpath...>] [--mode snapshot|workspace] [--timeout-ms <n>] [--run-id <id>] -- <exe> [args...]
+  attach-ui   [--before <imgPath>] --after <imgPath> --route <route> --viewport <WxH> [--theme <t>] [--notes "<text>"] [--new-surface-reason "<text>"] [--run-id <id>]
+  verify      --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [--why-file <p>] [--case <c>] [--granularity <g>] [--pick-before <re>] [--pick-after <re>] [--max-lines <n>] [--allow-different-probe-cmd] [--no-ui-impact "<reason>"] [--reviewed-by "<model> via <harness>"...] [--run-id <id>]
+  commit      --type <feat|fix|refactor|perf|ui|docs|test|chore> [--scope <s>] --title <t> --why <w> [--why-file <p>] [--case <c>] [--granularity <g>] [--pick-before <re>] [--pick-after <re>] [--max-lines <n>] [--allow-different-probe-cmd] [--no-ui-impact "<reason>"] [--reviewed-by "<model> via <harness>"...] [--run-id <id>]
+  publish-pr  [--base <branch>] [--repo <[host/]owner/repo>] [--title "<title>"] [--summary "<text>"] [--reviewed-by "<model> via <harness>"...] [--clear-reviewers] [--closes <n>] [--draft] [--allow-custom-origin] [--allow-private-unverified-assets] [--allow-partial-commits] [--skip-push-check] [--gh-bin <path>]
   inspect     [<commit-oid>]
 `);
 }
@@ -881,15 +1296,196 @@ function extractSingleReportBlock(bodyText) {
   };
 }
 
-function parseExistingHostedUiUrls(existingBody) {
+function isTrustedHostedAssetUrl(rawUrl, effectiveHost = "github.com") {
+  const urlStr = String(rawUrl || "");
+  if (urlStr.includes("..")) return false;
+  if (TRUSTED_HOSTED_ASSET_URL_RE.test(urlStr)) return true;
+  if (effectiveHost && effectiveHost.toLowerCase() !== "github.com") {
+    try {
+      const u = new URL(urlStr);
+      return (
+        u.protocol === "https:" &&
+        !u.username &&
+        !u.password &&
+        u.hostname.toLowerCase() === effectiveHost.toLowerCase() &&
+        /^\/(?:user-attachments\/assets\/|storage\/user\/)[0-9A-Za-z._/-]+$/.test(u.pathname)
+      );
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function parseExistingHostedUiUrls(existingBody, effectiveHost = "github.com") {
   const map = new Map();
   const parsed = extractSingleReportBlock(existingBody);
   if (!parsed) return map;
-  const re = /!\[(evc-[0-9a-f]{8}-(?:before|after)-[0-9a-f]{12})\]\((https:\/\/[^)\s]+)\)/g;
-  for (const m of parsed.inner.matchAll(re)) {
-    map.set(m[1], m[2]);
+  const seenSlots = new Set();
+  const anySlotRe = /!\[(evc-[0-9a-f]{8}-(?:before|after)-[0-9a-f]{12})\]\(([^)\s]+)\)/g;
+  for (const m of parsed.inner.matchAll(anySlotRe)) {
+    const [, altTag, candidateUrl] = m;
+    if (seenSlots.has(altTag)) {
+      throw new Error(
+        `Corrupted or spoofed PR report block: duplicate UI evidence slot "${altTag}" detected.`,
+      );
+    }
+    seenSlots.add(altTag);
+    if (isTrustedHostedAssetUrl(candidateUrl, effectiveHost)) {
+      map.set(altTag, candidateUrl);
+    }
   }
   return map;
+}
+
+function receiptSlotKey(host, repoSlug, altTag) {
+  return `${host.toLowerCase()}/${repoSlug.toLowerCase()}#${altTag}`;
+}
+
+function resolveAssetFetchFn(explicitFetchFn) {
+  if (explicitFetchFn) return explicitFetchFn;
+  const mockMapPath = process.env.PROOF_COMMIT_MOCK_ASSET_MAP;
+  if (mockMapPath) {
+    return async (url) => {
+      const mapObj = fs.existsSync(mockMapPath)
+        ? JSON.parse(fs.readFileSync(mockMapPath, "utf8"))
+        : {};
+      const entry = mapObj[url];
+      if (!entry || !fs.existsSync(entry)) {
+        return { headers: new Map(), status: 404 };
+      }
+      const bytes = fs.readFileSync(entry);
+      return {
+        arrayBuffer: async () => bytes,
+        headers: new Map([
+          ["content-length", String(bytes.length)],
+          ["content-type", "image/png"],
+        ]),
+        status: 200,
+      };
+    };
+  }
+  return globalThis.fetch;
+}
+
+export async function verifyHostedAssetBytes(
+  assetUrl,
+  expectedSha256,
+  { fetchFn = null, allowPrivateUnverifiedAssets = false, effectiveHost = "github.com" } = {},
+) {
+  const activeFetch = resolveAssetFetchFn(fetchFn);
+  const urlStr = String(assetUrl || "");
+  if (!isTrustedHostedAssetUrl(urlStr, effectiveHost)) {
+    throw new Error("Untrusted hosted screenshot URL format.");
+  }
+  let currentUrl = urlStr;
+  let res = null;
+  for (let hop = 0; ; hop++) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(currentUrl);
+    } catch {
+      throw new Error("Malformed hosted screenshot URL during verification.");
+    }
+    const hostOk =
+      ALLOWED_ASSET_FETCH_HOST_RE.test(parsedUrl.hostname) ||
+      (effectiveHost && parsedUrl.hostname.toLowerCase() === effectiveHost.toLowerCase());
+    if (parsedUrl.protocol !== "https:" || parsedUrl.username || parsedUrl.password || !hostOk) {
+      throw new Error(
+        `Refusing to fetch screenshot from untrusted host "${parsedUrl.hostname}".`,
+      );
+    }
+    res = await activeFetch(currentUrl, {
+      headers: { Accept: "image/*" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.status >= 300 && res.status < 400) {
+      if (hop >= 5) {
+        throw new Error("Hosted screenshot verification exceeded maximum redirect hops.");
+      }
+      const loc = res.headers?.get?.("location");
+      if (!loc) throw new Error("Hosted screenshot redirect missing Location header.");
+      currentUrl = new URL(loc, currentUrl).toString();
+      continue;
+    }
+    break;
+  }
+  const contentType = String(res.headers?.get?.("content-type") || "");
+  const isCookieGatedHtml = res.status === 200 && /^text\/html\b/i.test(contentType);
+  if (
+    (res.status === 401 || res.status === 403 || res.status === 404 || isCookieGatedHtml) &&
+    allowPrivateUnverifiedAssets
+  ) {
+    return { verifiedBytes: false };
+  }
+  if (isCookieGatedHtml || res.status !== 200) {
+    throw new Error(
+      `Failed to fetch hosted screenshot for SHA-256 verification (${isCookieGatedHtml ? "received HTML login gate" : `HTTP ${res.status}`}); pass --allow-private-unverified-assets if publishing to a private repository with cookie-gated attachments.`,
+    );
+  }
+  const maxBytes = 64 * 1024 * 1024;
+  const declaredLen = Number(res.headers?.get?.("content-length") || 0);
+  if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
+    throw new Error("Hosted screenshot exceeds 64 MiB limit.");
+  }
+  let buf;
+  if (res.body && typeof res.body[Symbol.asyncIterator] === "function") {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of res.body) {
+      const b = Buffer.from(chunk);
+      total += b.length;
+      if (total > maxBytes) {
+        throw new Error("Hosted screenshot exceeds 64 MiB limit.");
+      }
+      chunks.push(b);
+    }
+    buf = Buffer.concat(chunks, total);
+  } else {
+    const ab = await res.arrayBuffer();
+    buf = Buffer.from(ab);
+    if (buf.length > maxBytes) {
+      throw new Error("Hosted screenshot exceeds 64 MiB limit.");
+    }
+  }
+  const actualSha = sha256Hex(buf);
+  if (actualSha !== expectedSha256) {
+    throw new Error(
+      `Hosted screenshot SHA-256 mismatch (expected ${expectedSha256.slice(0, 12)}, got ${actualSha.slice(0, 12)}).`,
+    );
+  }
+  return { verifiedBytes: true };
+}
+
+function loadTrustedUploadReceipts(commonDir, effectiveHost = "github.com") {
+  const receiptsFile = path.join(commonDir, "proof-commit", "pr", "upload-receipts.json");
+  if (!fs.existsSync(receiptsFile)) return new Map();
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(receiptsFile, "utf8"));
+  } catch {
+    throw new Error(`Corrupted upload-receipts.json at ${receiptsFile}; inspect or remove file.`);
+  }
+  const map = new Map();
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === "string" && isTrustedHostedAssetUrl(v, effectiveHost)) {
+        map.set(k, v);
+      }
+    }
+  }
+  return map;
+}
+
+function saveTrustedUploadReceipts(commonDir, receiptsMap) {
+  const prDir = path.join(commonDir, "proof-commit", "pr");
+  fs.mkdirSync(prDir, { recursive: true });
+  const obj = Object.fromEntries([...receiptsMap.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  writeFileAtomic(
+    path.join(prDir, "upload-receipts.json"),
+    Buffer.from(`${JSON.stringify(obj, null, 2)}\n`, "utf8"),
+  );
 }
 
 function mergeReportBlockIntoBody(existingBody, summaryText, closesIssue, reportInner) {
@@ -911,7 +1507,7 @@ function mergeReportBlockIntoBody(existingBody, summaryText, closesIssue, report
   if (existingBody && existingBody.trim()) {
     parts.push(existingBody.trim());
   } else {
-    parts.push("## Summary", "", (summaryText || "Evidence-backed pull request.").trim());
+    parts.push("## Author Summary", "", (summaryText || "Evidence-backed pull request.").trim());
     if (closesIssue) {
       parts.push("", `Closes #${String(closesIssue).replace(/^#/, "")}`);
     }
@@ -920,15 +1516,82 @@ function mergeReportBlockIntoBody(existingBody, summaryText, closesIssue, report
   return parts.join("\n");
 }
 
-function parseOriginRepoSlug(repoRoot) {
-  const r = git(repoRoot, ["remote", "get-url", "origin"], { allowFail: true });
-  if (r.status !== 0) return null;
-  const url = r.stdout.trim();
-  const httpsMatch = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?$/i.exec(url);
-  return httpsMatch ? httpsMatch[1] : null;
+function assertSafeOwnerRepoSegments(slug) {
+  const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(slug);
+  if (!m) return null;
+  const [, owner, repo] = m;
+  if (owner === "." || owner === ".." || repo === "." || repo === "..") return null;
+  return `${owner}/${repo}`;
 }
 
-function invokeGhCli(cwd, ghArgs, ghOverride) {
+export function parseRepoTargetInput(rawSlug, { allowCustomHost = false } = {}) {
+  if (!rawSlug) return null;
+  const trimmed = String(rawSlug)
+    .trim()
+    .replace(/^https?:\/\/(?:[^@/\s]+@)?/i, "")
+    .replace(/\.git\/?$/i, "")
+    .replace(/\/+$/, "");
+  const parts = trimmed.split("/");
+  let host = null;
+  let ownerRepo = null;
+  if (parts.length === 2) {
+    ownerRepo = assertSafeOwnerRepoSegments(trimmed);
+  } else if (parts.length === 3 && /^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(parts[0])) {
+    host = parts[0].toLowerCase();
+    ownerRepo = assertSafeOwnerRepoSegments(`${parts[1]}/${parts[2]}`);
+  }
+  if (!ownerRepo) {
+    throw new Error('Invalid --repo slug: expected "owner/repo" (or "host/owner/repo" with --allow-custom-origin).');
+  }
+  if (!allowCustomHost && host && host !== "github.com") {
+    throw new Error('Invalid --repo slug: expected "owner/repo" on github.com (or pass --allow-custom-origin).');
+  }
+  return { host, slug: ownerRepo };
+}
+
+export function normalizeRepoSlugInput(rawSlug) {
+  const parsed = parseRepoTargetInput(rawSlug, { allowCustomHost: false });
+  return parsed ? parsed.slug : null;
+}
+
+export function parseOriginHostAndSlugFromUrl(rawUrl) {
+  const url = String(rawUrl ?? "").trim();
+  if (!url) return null;
+  const m =
+    /^(?:https:\/\/(?:[^@/\s]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?::\d+)?\/|ssh:\/\/(?:[^@/\s]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?::\d+)?\/|git@([A-Za-z0-9.-]+\.[A-Za-z]{2,}):)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i.exec(
+      url,
+    );
+  if (!m) return null;
+  const host = (m[1] || m[2] || m[3]).toLowerCase();
+  const slug = assertSafeOwnerRepoSegments(m[4]);
+  return slug ? { host, slug } : null;
+}
+
+export function parseOriginRepoSlugFromUrl(rawUrl) {
+  const info = parseOriginHostAndSlugFromUrl(rawUrl);
+  return info && info.host === "github.com" ? info.slug : null;
+}
+
+function parseOriginInfo(repoRoot) {
+  const r = git(repoRoot, ["remote", "get-url", "origin"], { allowFail: true });
+  if (r.status !== 0) return null;
+  return parseOriginHostAndSlugFromUrl(r.stdout);
+}
+
+function resolveExactRemoteBranchOid(repoRoot, branchName) {
+  const fullRef = `refs/heads/${branchName}`;
+  const out = git(repoRoot, ["ls-remote", "--heads", "origin", fullRef]).stdout;
+  for (const line of out.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [oid, ref] = line.trim().split(/\s+/);
+    if (ref === fullRef && /^[0-9a-f]{40,64}$/i.test(oid)) {
+      return oid;
+    }
+  }
+  return null;
+}
+
+function invokeGhCli(cwd, ghArgs, ghOverride, ghHost = "github.com") {
   const bin = ghOverride || process.env.PROOF_COMMIT_GH_BIN || "gh";
   let exe = bin;
   let fullArgs = ghArgs;
@@ -938,7 +1601,7 @@ function invokeGhCli(cwd, ghArgs, ghOverride) {
   }
   const res = spawnSync(exe, fullArgs, {
     cwd,
-    env: cleanGitEnv(),
+    env: cleanGitEnv({ GH_HOST: ghHost }),
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
     windowsHide: true,
@@ -947,10 +1610,73 @@ function invokeGhCli(cwd, ghArgs, ghOverride) {
   return res;
 }
 
-function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest) {
+function loadLocalPrReviewers(commonDir, repoSlug, baseBranch, headOid) {
+  if (!/^[0-9a-f]{40,64}$/.test(headOid)) return [];
+  const prStateFile = path.join(commonDir, "proof-commit", "pr", `${headOid}.json`);
+  if (!fs.existsSync(prStateFile)) return [];
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(prStateFile, "utf8"));
+  } catch {
+    throw new Error(
+      `Corrupted local PR reviewer state at ${prStateFile}; pass --clear-reviewers to reset.`,
+    );
+  }
+  if (data.head_oid !== headOid || !data.entries || typeof data.entries !== "object") {
+    throw new Error(`Corrupted local PR reviewer state at ${prStateFile}.`);
+  }
+  const slotKey = `${repoSlug.toLowerCase()}#${baseBranch}`;
+  return normalizeReviewers(data.entries[slotKey] || []);
+}
+
+function saveLocalPrReviewers(commonDir, repoSlug, baseBranch, headOid, reviewers) {
+  if (!/^[0-9a-f]{40,64}$/.test(headOid)) return;
+  const prDir = path.join(commonDir, "proof-commit", "pr");
+  const prStateFile = path.join(prDir, `${headOid}.json`);
+  let entries = {};
+  if (fs.existsSync(prStateFile)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(prStateFile, "utf8"));
+      if (existing && existing.head_oid === headOid && existing.entries && typeof existing.entries === "object") {
+        entries = { ...existing.entries };
+      }
+    } catch {
+      if (reviewers.length > 0) {
+        throw new Error(`Corrupted local PR reviewer state at ${prStateFile}; pass --clear-reviewers to reset.`);
+      }
+    }
+  }
+  const slotKey = `${repoSlug.toLowerCase()}#${baseBranch}`;
+  if (reviewers.length === 0) {
+    delete entries[slotKey];
+  } else {
+    entries[slotKey] = reviewers;
+  }
+  if (Object.keys(entries).length === 0) {
+    fs.rmSync(prStateFile, { force: true });
+    return;
+  }
+  fs.mkdirSync(prDir, { recursive: true });
+  writeFileAtomic(
+    prStateFile,
+    Buffer.from(`${JSON.stringify({ entries, head_oid: headOid }, null, 2)}\n`, "utf8"),
+  );
+}
+
+function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest, expectedMappingEvidenceId = null) {
   if (manifest.commit_oid !== oid) {
     throw new Error(`Bundle commit_oid (${manifest.commit_oid}) != ${oid}`);
   }
+  if (manifest.schema_version !== 1 && manifest.schema_version !== 2) {
+    throw new Error(
+      `Unsupported bundle schema_version "${manifest.schema_version}" on ${oid.slice(0, 12)}; upgrade proof_commit.mjs.`,
+    );
+  }
+  assertValidEvidenceIdFormat(manifest.evidence_id, "manifest.evidence_id");
+  if (expectedMappingEvidenceId) {
+    assertValidEvidenceIdFormat(expectedMappingEvidenceId, "mapping.evidence_id");
+  }
+
   const rawCommit = git(repoRoot, ["cat-file", "commit", oid]).stdout;
   const { actualTree, actualParent, bodyBlock, parentCount } =
     parseCommitObjectHeaderAndBody(rawCommit);
@@ -960,16 +1686,62 @@ function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest) {
   if (actualTree !== manifest.tree_oid || actualParent !== manifest.parent_oid) {
     throw new Error(`Commit ${oid.slice(0, 12)} tree/parent drifted from stored manifest.`);
   }
-  if (manifest.commit_message && bodyBlock !== manifest.commit_message) {
-    throw new Error(`Commit ${oid.slice(0, 12)} message bytes drifted from stored manifest.`);
+  if (manifest.schema_version >= 2 || manifest.commit_message !== undefined) {
+    if (
+      !manifest.commit_message ||
+      typeof manifest.commit_message !== "string" ||
+      bodyBlock !== manifest.commit_message
+    ) {
+      throw new Error(`Commit ${oid.slice(0, 12)} message bytes missing or drifted from stored manifest.`);
+    }
+  }
+  if (manifest.schema_version >= 2) {
+    const whyBlockMatch = /\nWhy:\n([\s\S]*?)\n\n(?:Granularity|Evidence):\n/.exec(bodyBlock);
+    if (typeof manifest.why !== "string" || !whyBlockMatch || whyBlockMatch[1] !== manifest.why) {
+      throw new Error(`Stored manifest.why on ${oid.slice(0, 12)} drifted from verified commit message.`);
+    }
+    assertSingleLineStructuralField(manifest.case_name || "", "manifest.case_name", 240);
+  } else if (typeof manifest.why === "string" && manifest.why && !bodyBlock.includes(manifest.why)) {
+    throw new Error(`Stored manifest.why on ${oid.slice(0, 12)} drifted from verified commit message.`);
+  }
+
+  let normalizedManifestReviewers = [];
+  if (manifest.reviewers !== undefined) {
+    if (!Array.isArray(manifest.reviewers) || manifest.reviewers.length === 0) {
+      throw new Error(
+        `Stored manifest.reviewers on ${oid.slice(0, 12)} must be a non-empty array when present.`,
+      );
+    }
+    normalizedManifestReviewers = normalizeReviewers(manifest.reviewers);
+    if (canonicalJson(manifest.reviewers) !== canonicalJson(normalizedManifestReviewers)) {
+      throw new Error(
+        `Stored manifest.reviewers on ${oid.slice(0, 12)} is non-canonical (contains duplicates, extra keys, or unsorted entries).`,
+      );
+    }
+  }
+
+  const noUiImpactReason =
+    manifest.no_ui_impact_reason !== undefined && manifest.no_ui_impact_reason !== null
+      ? assertSingleLineStructuralField(manifest.no_ui_impact_reason, "manifest.no_ui_impact_reason", 200)
+      : null;
+
+  const hasV2UiNotes = Boolean(manifest.ui && typeof manifest.ui.notes === "string" && manifest.ui.notes.length > 0);
+  const expectedSchemaVersion =
+    normalizedManifestReviewers.length > 0 || Boolean(noUiImpactReason) || hasV2UiNotes ? 2 : 1;
+  if (manifest.schema_version !== expectedSchemaVersion) {
+    throw new Error(
+      `Stored schema_version (${manifest.schema_version}) on ${oid.slice(0, 12)} disagrees with payload fields (expected ${expectedSchemaVersion}).`,
+    );
   }
 
   const canonicalPayload = {
     after: manifest.after,
     before: manifest.before,
     case_name: manifest.case_name,
+    ...(noUiImpactReason ? { no_ui_impact_reason: noUiImpactReason } : {}),
     overlay: manifest.overlay || [],
     parent_oid: manifest.parent_oid,
+    ...(normalizedManifestReviewers.length > 0 ? { reviewers: normalizedManifestReviewers } : {}),
     schema_version: manifest.schema_version,
     scope: manifest.scope ?? null,
     tree_oid: manifest.tree_oid,
@@ -982,6 +1754,36 @@ function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest) {
     throw new Error(
       `Bundle Evidence-ID mismatch on ${oid.slice(0, 12)}: expected ${manifest.evidence_id}, recomputed ${recomputedId}.`,
     );
+  }
+  if (expectedMappingEvidenceId && recomputedId !== expectedMappingEvidenceId) {
+    throw new Error(
+      `Commit mapping Evidence-ID mismatch on ${oid.slice(0, 12)}: mapping=${expectedMappingEvidenceId}, recomputed=${recomputedId}.`,
+    );
+  }
+
+  const evMatches = [...bodyBlock.matchAll(/^Evidence-ID:\s*(\S+)\s*$/gm)];
+  if (evMatches.length !== 1 || evMatches[0][1] !== recomputedId) {
+    throw new Error(
+      `Git commit ${oid.slice(0, 12)} Evidence-ID trailer missing, duplicated, or mismatched with recomputed digest.`,
+    );
+  }
+  const gitRevLines = [...bodyBlock.matchAll(/^AI-Reviewed-By:\s*(.+?)\s*$/gm)].map(
+    (m) => `AI-Reviewed-By: ${m[1]}`,
+  );
+  const expectedRevLines = normalizedManifestReviewers.map(formatReviewerTrailer);
+  if (
+    gitRevLines.length !== expectedRevLines.length ||
+    gitRevLines.some((line, idx) => line !== expectedRevLines[idx])
+  ) {
+    throw new Error(
+      `Git commit ${oid.slice(0, 12)} AI-Reviewed-By trailers disagree with verified manifest reviewers.`,
+    );
+  }
+  if (noUiImpactReason) {
+    const expectedNoUiLine = `UI-Impact: none (${noUiImpactReason})`;
+    if (!bodyBlock.split(/\r?\n/).includes(expectedNoUiLine)) {
+      throw new Error(`Git commit ${oid.slice(0, 12)} missing expected UI-Impact trailer.`);
+    }
   }
 
   for (const phaseName of ["before", "after"]) {
@@ -1005,13 +1807,44 @@ function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest) {
     }
   }
 
-  if (manifest.ui_details) {
+  const hasCanonicalUi = manifest.ui !== null && manifest.ui !== undefined;
+  const hasUiDetails = manifest.ui_details !== null && manifest.ui_details !== undefined;
+  if (hasCanonicalUi !== hasUiDetails) {
+    throw new Error(
+      `Stored UI metadata mismatch on ${oid.slice(0, 12)}: canonical ui presence (${hasCanonicalUi}) != ui_details presence (${hasUiDetails}).`,
+    );
+  }
+  if (hasCanonicalUi) {
+    const cu = manifest.ui;
+    const ud = manifest.ui_details;
+    if (
+      ud.route !== cu.route ||
+      ud.viewport !== cu.viewport ||
+      ud.theme !== cu.theme ||
+      (ud.new_surface_reason ?? null) !== (cu.new_surface_reason ?? null) ||
+      (ud.after?.sha256 ?? null) !== (cu.after_sha256 ?? null) ||
+      (ud.before?.sha256 ?? null) !== (cu.before_sha256 ?? null) ||
+      (manifest.schema_version >= 2 && (ud.notes || "") !== (cu.notes || ""))
+    ) {
+      throw new Error(
+        `Stored ui_details on ${oid.slice(0, 12)} drifted from canonical hashed ui payload.`,
+      );
+    }
+    if (ud.notes) {
+      if (manifest.schema_version >= 2) {
+        assertSingleLineStructuralField(String(ud.notes), "stored_ui_notes", 240);
+      }
+      scanPublicTextPrivacy(String(ud.notes), "stored_ui_notes");
+    }
     for (const kind of ["before", "after"]) {
-      const meta = manifest.ui_details[kind];
+      const meta = ud[kind];
       if (!meta) continue;
+      if (!ALLOWED_UI_EXTS.has(meta.ext)) {
+        throw new Error(`Invalid stored UI screenshot extension "${meta.ext}" on ${oid.slice(0, 12)}.`);
+      }
       const imgPath = path.join(bundleDir, "ui", `${kind}.${meta.ext}`);
       if (!fs.existsSync(imgPath)) {
-        throw new Error(`Missing stored UI screenshot ${imgPath}.`);
+        throw new Error(`Missing stored UI screenshot ui/${kind}.${meta.ext} on ${oid.slice(0, 12)}.`);
       }
       const bytes = fs.readFileSync(imgPath);
       parseImageDimensions(bytes);
@@ -1022,18 +1855,30 @@ function reverifyStoredBundle(repoRoot, oid, bundleDir, manifest) {
   }
 }
 
-function normalizeHostedUrlsForComparison(reportInner) {
-  return reportInner
-    .replace(
-      /!\[(evc-[0-9a-f]{8}-(?:before|after)-[0-9a-f]{12})\]\((?:https:\/\/[^)\s]+|\.\/[^)\s]+)\)/g,
-      "![$1](<HOSTED_ASSET>)",
-    )
-    .replace(/\r\n/g, "\n")
-    .trim();
+function normalizeHostedUrlsForComparison(reportInner, expectedAltTags = []) {
+  let out = reportInner.replace(/\r\n/g, "\n");
+  for (const altTag of expectedAltTags) {
+    const escaped = altTag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const slotRe = new RegExp(`!\\[(${escaped})\\]\\((?:https:\\/\\/[^)\\s]+|\\.\\/[^)\\s]+)\\)`, "g");
+    out = out.replace(slotRe, "![$1](<HOSTED_ASSET>)");
+  }
+  return out.trim();
 }
 
 async function cmdPublishPr(argv) {
-  const { flags } = parseFlags(argv);
+  const { flags, multi } = parseFlags(argv, "publish-pr");
+  const prExtraReviewers = normalizeReviewers(multi["reviewed-by"]);
+  const validatedExplicitTitle = flags.title
+    ? assertSingleLineStructuralField(flags.title, "pr_title", 240)
+    : null;
+  if (validatedExplicitTitle) {
+    scanPublicTextPrivacy(validatedExplicitTitle, "pr_title");
+  }
+  const validatedSummary =
+    flags.summary !== undefined ? assertPrSummaryText(flags.summary) : null;
+  if (validatedSummary) {
+    scanPublicTextPrivacy(validatedSummary, "pr_summary");
+  }
   const { repoRoot, commonDir } = resolveRepoContext();
   const ghOverride = flags["gh-bin"] || null;
 
@@ -1044,29 +1889,85 @@ async function cmdPublishPr(argv) {
   }
 
   const baseBranch = (flags.base || "main").replace(/^origin\//, "");
+  if (
+    !baseBranch ||
+    baseBranch.startsWith("-") ||
+    git(repoRoot, ["check-ref-format", "--branch", baseBranch], { allowFail: true }).status !== 0
+  ) {
+    throw new Error(`Invalid --base branch name "${baseBranch}".`);
+  }
   if (headBranch === baseBranch) {
     throw new Error(`Refusing to run \`publish-pr\` directly on base branch "${baseBranch}".`);
   }
 
-  const repoSlug = flags.repo || parseOriginRepoSlug(repoRoot);
+  if (flags.closes !== undefined) {
+    assertPositiveIntFlag(String(flags.closes).replace(/^#/, ""), "closes");
+  }
+  const originInfo = parseOriginInfo(repoRoot);
+  const originSlug = originInfo && originInfo.host === "github.com" ? originInfo.slug : null;
+  const repoTarget = flags.repo
+    ? parseRepoTargetInput(flags.repo, { allowCustomHost: Boolean(flags["allow-custom-origin"]) })
+    : null;
+  const repoSlug = repoTarget ? repoTarget.slug : flags["allow-custom-origin"] ? originInfo?.slug || null : originSlug;
   if (!repoSlug) {
     throw new Error("Could not determine GitHub repository slug (`owner/repo`). Pass `--repo owner/repo` or configure `origin`.");
   }
+  if (
+    flags["allow-custom-origin"] &&
+    originInfo?.host &&
+    repoTarget?.host &&
+    originInfo.host.toLowerCase() !== repoTarget.host.toLowerCase()
+  ) {
+    throw new Error(
+      `Target --repo host "${repoTarget.host}" differs from git remote origin host "${originInfo.host}".`,
+    );
+  }
+  if (flags["allow-custom-origin"] && !originInfo?.host && !repoTarget?.host) {
+    throw new Error(
+      'When --allow-custom-origin is used with a local or non-URL origin, pass an explicit host-qualified --repo "<host>/<owner>/<repo>".',
+    );
+  }
+  const effectiveHost = flags["allow-custom-origin"]
+    ? (repoTarget?.host || originInfo?.host).toLowerCase()
+    : "github.com";
 
   const hasOrigin = git(repoRoot, ["remote", "get-url", "origin"], { allowFail: true }).status === 0;
   let baseRangeRef = baseBranch;
-  if (hasOrigin && !flags["skip-push-check"] && !ghOverride) {
-    const lsHead = git(repoRoot, ["ls-remote", "--heads", "origin", headBranch]).stdout.trim();
-    const remoteHeadOid = lsHead ? lsHead.split(/\s+/)[0] : null;
-    if (remoteHeadOid !== headOid) {
+  let remoteBaseOid = null;
+  if (!flags["skip-push-check"]) {
+    if (!hasOrigin) {
       throw new Error(
-        `Local HEAD (${headOid.slice(0, 12)}) does not match remote origin/${headBranch} (${remoteHeadOid ? remoteHeadOid.slice(0, 12) : "unpushed"}). Push your branch before running \`publish-pr\`.`,
+        "No git remote \"origin\" configured; configure `origin` and push your branch before running `publish-pr`.",
       );
     }
-    const lsBase = git(repoRoot, ["ls-remote", "--heads", "origin", baseBranch]).stdout.trim();
-    const remoteBaseOid = lsBase ? lsBase.split(/\s+/)[0] : null;
+    if (!flags["allow-custom-origin"]) {
+      if (!originSlug) {
+        throw new Error(
+          "Git remote \"origin\" is not a recognized github.com repository URL; configure github.com origin or pass `--allow-custom-origin --repo [host/]owner/repo` for enterprise remotes.",
+        );
+      }
+      if (originSlug.toLowerCase() !== repoSlug.toLowerCase()) {
+        throw new Error(
+          `Target --repo "${repoSlug}" differs from git remote origin "${originSlug}". Configure matching origin or pass --allow-custom-origin if intentional.`,
+        );
+      }
+    } else if (originInfo?.slug && originInfo.slug.toLowerCase() !== repoSlug.toLowerCase()) {
+      throw new Error(
+        `Target --repo "${repoSlug}" differs from git remote origin "${originInfo.slug}".`,
+      );
+    }
+    const remoteHeadOid = resolveExactRemoteBranchOid(repoRoot, headBranch);
+    if (remoteHeadOid !== headOid) {
+      throw new Error(
+        `Local HEAD (${headOid.slice(0, 12)}) does not match remote origin/refs/heads/${headBranch} (${remoteHeadOid ? remoteHeadOid.slice(0, 12) : "unpushed"}). Push your branch before running \`publish-pr\`.`,
+      );
+    }
+    remoteBaseOid = resolveExactRemoteBranchOid(repoRoot, baseBranch);
     if (!remoteBaseOid) {
-      throw new Error(`Base branch "${baseBranch}" was not found on remote origin.`);
+      throw new Error(`Base branch "refs/heads/${baseBranch}" was not found on remote origin.`);
+    }
+    if (git(repoRoot, ["cat-file", "-e", `${remoteBaseOid}^{commit}`], { allowFail: true }).status !== 0) {
+      git(repoRoot, ["fetch", "--no-tags", "--quiet", "origin", `refs/heads/${baseBranch}`]);
     }
     baseRangeRef = remoteBaseOid;
   } else {
@@ -1076,10 +1977,10 @@ async function cmdPublishPr(argv) {
     if (originBase.status === 0) baseRangeRef = `origin/${baseBranch}`;
   }
 
-  const commitsOut = git(repoRoot, ["rev-list", "--reverse", `${baseRangeRef}..HEAD`]).stdout.trim();
+  const commitsOut = git(repoRoot, ["rev-list", "--reverse", `${baseRangeRef}..${headOid}`]).stdout.trim();
   const commitOids = commitsOut ? commitsOut.split(/\r?\n/).filter(Boolean) : [];
   if (commitOids.length === 0) {
-    throw new Error(`No commits found in range ${baseRangeRef.slice(0, 12)}..HEAD.`);
+    throw new Error(`No commits found in range ${baseRangeRef.slice(0, 12)}..${headOid.slice(0, 12)}.`);
   }
 
   const verifiedBundles = [];
@@ -1091,17 +1992,30 @@ async function cmdPublishPr(argv) {
       missingCommits.push(`${oid.slice(0, 12)} (no local proof-commit bundle)`);
       continue;
     }
-    const mapping = JSON.parse(fs.readFileSync(mapFile, "utf8"));
+    let mapping;
+    try {
+      mapping = JSON.parse(fs.readFileSync(mapFile, "utf8"));
+      assertValidEvidenceIdFormat(mapping.evidence_id, "mapping.evidence_id");
+    } catch (err) {
+      missingCommits.push(`${oid.slice(0, 12)} (${err.message})`);
+      continue;
+    }
     const digestHex = mapping.evidence_id.replace(/^sha256:/, "");
-    const bundleDir = path.join(commonDir, "proof-commit", "bundles", digestHex);
+    const bundlesRoot = path.resolve(commonDir, "proof-commit", "bundles");
+    const bundleDir = path.resolve(bundlesRoot, digestHex);
+    if (path.dirname(bundleDir) !== bundlesRoot) {
+      missingCommits.push(`${oid.slice(0, 12)} (bundle path containment failed)`);
+      continue;
+    }
     const manifestPath = path.join(bundleDir, "manifest.json");
     if (!fs.existsSync(manifestPath)) {
       missingCommits.push(`${oid.slice(0, 12)} (bundle manifest missing for ${mapping.evidence_id})`);
       continue;
     }
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    let manifest;
     try {
-      reverifyStoredBundle(repoRoot, oid, bundleDir, manifest);
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      reverifyStoredBundle(repoRoot, oid, bundleDir, manifest, mapping.evidence_id);
     } catch (err) {
       missingCommits.push(`${oid.slice(0, 12)} (${err.message})`);
       continue;
@@ -1116,7 +2030,54 @@ async function cmdPublishPr(argv) {
     );
   }
 
-  const repoArgs = ["--repo", repoSlug];
+  const qualifiedRepoTarget = `${effectiveHost}/${repoSlug}`;
+  const repoArgs = ["--repo", qualifiedRepoTarget];
+  const prJsonFields =
+    "number,url,body,headRefOid,baseRefName,baseRefOid,headRefName,state,isCrossRepository,headRepositoryOwner,headRepository";
+
+  const isSameRepoPr = (pr) => {
+    if (!pr || pr.isCrossRepository !== false) return false;
+    const ownerLogin = pr.headRepositoryOwner?.login;
+    const repoName = pr.headRepository?.name;
+    if (typeof ownerLogin !== "string" || typeof repoName !== "string") return false;
+    if (`${ownerLogin}/${repoName}`.toLowerCase() !== repoSlug.toLowerCase()) return false;
+    try {
+      const u = new URL(String(pr.url || ""));
+      if (u.protocol !== "https:" || u.hostname.toLowerCase() !== effectiveHost) return false;
+    } catch {
+      return false;
+    }
+    return true;
+  };
+
+  const isValidPrBaseRange = (prBaseOid) => {
+    if (!/^[0-9a-f]{40,64}$/i.test(String(prBaseOid || ""))) return false;
+    const hasLocalObj =
+      git(repoRoot, ["cat-file", "-e", `${prBaseOid}^{commit}`], { allowFail: true }).status === 0;
+    const matchesVerifiedRange = () => {
+      const prRangeOut = git(repoRoot, ["rev-list", "--reverse", `${prBaseOid}..${headOid}`], {
+        allowFail: true,
+      });
+      if (prRangeOut.status !== 0) return false;
+      const prRangeOids = prRangeOut.stdout.trim().split(/\r?\n/).filter(Boolean);
+      return (
+        prRangeOids.length === commitOids.length &&
+        prRangeOids.every((oid, idx) => oid === commitOids[idx])
+      );
+    };
+    if (flags["skip-push-check"] || !remoteBaseOid) {
+      return hasLocalObj ? matchesVerifiedRange() : true;
+    }
+    if (prBaseOid === remoteBaseOid) return true;
+    if (!hasLocalObj) return false;
+    const isAncestor =
+      git(repoRoot, ["merge-base", "--is-ancestor", prBaseOid, remoteBaseOid], {
+        allowFail: true,
+      }).status === 0;
+    if (!isAncestor) return false;
+    return matchesVerifiedRange();
+  };
+
   const findOpenPrByPair = () => {
     const r = invokeGhCli(
       repoRoot,
@@ -1131,20 +2092,29 @@ async function cmdPublishPr(argv) {
         "--head",
         headBranch,
         "--json",
-        "number,url,body,headRefOid,baseRefName,headRefName,state",
+        prJsonFields,
       ],
       ghOverride,
+      effectiveHost,
     );
-    if (r.status !== 0) return null;
-    try {
-      const arr = JSON.parse(r.stdout);
-      if (!Array.isArray(arr) || arr.length === 0) return null;
-      return (
-        arr.find((p) => p.baseRefName === baseBranch && p.headRefName === headBranch) || null
+    if (r.status !== 0) {
+      throw new Error(
+        `gh pr list failed (exit ${r.status}): ${(r.stderr || r.stdout || "").trim()}`,
       );
-    } catch {
-      return null;
     }
+    let arr;
+    try {
+      arr = JSON.parse(r.stdout);
+    } catch {
+      throw new Error("gh pr list returned invalid JSON.");
+    }
+    if (!Array.isArray(arr)) {
+      throw new Error("gh pr list returned non-array JSON response.");
+    }
+    return (
+      arr.find((p) => isSameRepoPr(p) && p.baseRefName === baseBranch && p.headRefName === headBranch) ||
+      null
+    );
   };
 
   const viewPrByNumber = (num) => {
@@ -1156,58 +2126,141 @@ async function cmdPublishPr(argv) {
         String(num),
         ...repoArgs,
         "--json",
-        "number,url,body,headRefOid,baseRefName,headRefName,state",
+        prJsonFields,
       ],
       ghOverride,
+      effectiveHost,
     );
-    if (r.status !== 0) return null;
+    if (r.status !== 0) {
+      throw new Error(
+        `gh pr view #${num} failed (exit ${r.status}): ${(r.stderr || r.stdout || "").trim()}`,
+      );
+    }
+    let parsed;
     try {
-      return JSON.parse(r.stdout);
+      parsed = JSON.parse(r.stdout);
     } catch {
-      return null;
+      throw new Error(`gh pr view #${num} returned invalid JSON.`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`gh pr view #${num} returned unexpected JSON payload.`);
+    }
+    return parsed;
+  };
+
+  const assertPrMatchesTarget = (pr, label, { requireOpen = true } = {}) => {
+    if (requireOpen && String(pr.state || "").toUpperCase() !== "OPEN") {
+      throw new Error(
+        `${label} PR #${pr.number} state is "${pr.state || "<missing>"}", expected OPEN.`,
+      );
+    }
+    if (!isSameRepoPr(pr)) {
+      throw new Error(
+        `${label} PR #${pr.number} does not originate from same repository "${repoSlug}" (cross-repository or missing headRepository metadata).`,
+      );
+    }
+    if (pr.baseRefName !== baseBranch || pr.headRefName !== headBranch) {
+      throw new Error(
+        `${label} PR #${pr.number} branch pair "${pr.headRefName || "<missing>"} -> ${pr.baseRefName || "<missing>"}" != expected "${headBranch} -> ${baseBranch}".`,
+      );
+    }
+    if (pr.headRefOid !== headOid) {
+      throw new Error(
+        `${label} PR #${pr.number} remote headRefOid (${String(pr.headRefOid || "<missing>").slice(0, 12)}) != local HEAD (${headOid.slice(0, 12)}). Push branch before updating PR evidence.`,
+      );
+    }
+    if (!/^[0-9a-f]{40,64}$/i.test(String(pr.baseRefOid || ""))) {
+      throw new Error(`${label} PR #${pr.number} is missing a valid baseRefOid.`);
+    }
+    if (!isValidPrBaseRange(pr.baseRefOid)) {
+      throw new Error(
+        `${label} PR #${pr.number} baseRefOid (${String(pr.baseRefOid).slice(0, 12)}) diverges from verified origin/${baseBranch} (${remoteBaseOid?.slice(0, 12)}) commit range; fetch origin/${baseBranch}, rebase/push, and re-run \`publish-pr\`.`,
+      );
     }
   };
 
   let existingPr = findOpenPrByPair();
-  if (existingPr && existingPr.headRefOid && existingPr.headRefOid !== headOid) {
-    throw new Error(
-      `Open PR #${existingPr.number} remote headRefOid (${existingPr.headRefOid.slice(0, 12)}) != local HEAD (${headOid.slice(0, 12)}). Push branch before updating PR evidence.`,
-    );
+  if (existingPr) {
+    assertPrMatchesTarget(existingPr, "Open");
   }
 
-  const existingHosted = parseExistingHostedUiUrls(existingPr ? existingPr.body : "");
+  const trustedReceipts = loadTrustedUploadReceipts(commonDir, effectiveHost);
+  const existingBodyUrls = parseExistingHostedUiUrls(
+    existingPr ? existingPr.body : "",
+    effectiveHost,
+  );
+  const existingHosted = new Map();
+  for (const [altTag, bodyUrl] of existingBodyUrls.entries()) {
+    if (trustedReceipts.get(receiptSlotKey(effectiveHost, repoSlug, altTag)) === bodyUrl) {
+      existingHosted.set(altTag, bodyUrl);
+    }
+  }
+  const qualifiedPrKeySlug = `${effectiveHost}/${repoSlug}`;
+  const priorLocalPrReviewers = flags["clear-reviewers"]
+    ? []
+    : loadLocalPrReviewers(commonDir, qualifiedPrKeySlug, baseBranch, headOid);
+  const branchReviewers = normalizeReviewers([...priorLocalPrReviewers, ...prExtraReviewers]);
+  saveLocalPrReviewers(commonDir, qualifiedPrKeySlug, baseBranch, headOid, branchReviewers);
+
   const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), "evcommit-pr-"));
 
   try {
     const pendingAttachments = [];
     const expectedUiAltTags = [];
+    const expectedUiDigests = new Map();
     const sectionLines = [
       "## Verification Evidence (`evidence-commit`)",
       "",
       `- **Base branch:** \`${baseBranch}\` | **Head OID:** \`${headOid}\``,
       `- **Verified commits:** ${verifiedBundles.length} / ${commitOids.length}`,
     ];
+    if (flags["skip-push-check"]) {
+      sectionLines.push("- **Push/base check:** `SKIPPED (--skip-push-check)`");
+    }
+    if (flags["allow-private-unverified-assets"]) {
+      sectionLines.push(
+        "- **Asset byte check:** `SKIPPED (--allow-private-unverified-assets)`",
+      );
+    } else if (process.env.PROOF_COMMIT_MOCK_ASSET_MAP) {
+      sectionLines.push("- **Asset byte check:** `MOCKED (PROOF_COMMIT_MOCK_ASSET_MAP)`");
+    }
+    if (branchReviewers.length > 0) {
+      sectionLines.push(
+        `- **Branch AI-Reviewed-By:** ${branchReviewers.map(formatReviewerMarkdown).join(", ")} _(self-attested)_`,
+      );
+    }
     if (missingCommits.length > 0) {
-      sectionLines.push(`- **Unverified gaps:** ${missingCommits.join("; ")}`);
+      sectionLines.push(
+        `- **Unverified gaps:** ${missingCommits.map((g) => safeInlineCode(collapseInlineWhitespace(g))).join("; ")}`,
+      );
     }
 
     for (const item of verifiedBundles) {
       const { bundleDir, manifest, oid, subject } = item;
       const shortSha = oid.slice(0, 8);
+      const commitReviewers = normalizeReviewers(manifest.reviewers || []);
+      const oneLineSubject = collapseInlineWhitespace(subject);
+      const oneLineWhy = collapseInlineWhitespace(manifest.why || "");
+      const oneLineCase = collapseInlineWhitespace(manifest.case_name || "");
       sectionLines.push(
         "",
-        `### \`${shortSha}\` — ${subject}`,
+        `### \`${shortSha}\` — ${safeInlineCode(oneLineSubject)}`,
         `- **Tree:** \`${manifest.tree_oid.slice(0, 12)}\` | **Mode:** \`${manifest.verification_mode}\` | **Evidence-ID:** \`${manifest.evidence_id}\``,
-        `- **Case:** ${manifest.case_name}`,
-        `- **Why:** ${manifest.why}`,
+        `- **Case:** ${safeInlineCode(oneLineCase)}`,
+        `- **Why:** ${safeInlineCode(oneLineWhy)}`,
       );
+      if (commitReviewers.length > 0) {
+        sectionLines.push(
+          `- **AI-Reviewed-By:** ${commitReviewers.map(formatReviewerMarkdown).join(", ")}`,
+        );
+      }
 
       if (manifest.before) {
         const bText = manifest.before.quotes.map((q) => q.text).join("\n");
         const fence = safeFenceForText(bText);
         sectionLines.push(
           "",
-          `**Before** (\`${manifest.before.argv_display}\`, exit \`${manifest.before.exit_code}\`):`,
+          `**Before** (${safeInlineCode(collapseInlineWhitespace(manifest.before.argv_display))}, exit \`${manifest.before.exit_code}\`):`,
           `${fence}text`,
           bText,
           fence,
@@ -1219,7 +2272,7 @@ async function cmdPublishPr(argv) {
         const fence = safeFenceForText(aText);
         sectionLines.push(
           "",
-          `**After** (\`${manifest.after.argv_display}\`, exit \`${manifest.after.exit_code}\`):`,
+          `**After** (${safeInlineCode(collapseInlineWhitespace(manifest.after.argv_display))}, exit \`${manifest.after.exit_code}\`):`,
           `${fence}text`,
           aText,
           fence,
@@ -1232,6 +2285,7 @@ async function cmdPublishPr(argv) {
           if (!metaObj) return "_N/A (new surface)_";
           const altTag = `evc-${shortSha}-${kind}-${metaObj.sha256.slice(0, 12)}`;
           expectedUiAltTags.push(altTag);
+          expectedUiDigests.set(altTag, metaObj.sha256);
           if (existingHosted.has(altTag)) {
             return `![${altTag}](${existingHosted.get(altTag)})`;
           }
@@ -1247,22 +2301,47 @@ async function cmdPublishPr(argv) {
         const afterCell = resolveSlotRef("after", ui.after);
         sectionLines.push(
           "",
-          `**Visual Verification** (route \`${ui.route}\`, viewport \`${ui.viewport}\`, theme \`${ui.theme}\`):`,
+          `**Visual Verification** (route ${safeInlineCode(collapseInlineWhitespace(ui.route))}, viewport ${safeInlineCode(collapseInlineWhitespace(ui.viewport))}, theme ${safeInlineCode(collapseInlineWhitespace(ui.theme))}):`,
           "",
           "| Before | After |",
           "| :---: | :---: |",
           `| ${beforeCell} | ${afterCell} |`,
         );
-        if (ui.notes) {
-          sectionLines.push("", `- **Inspection notes:** ${ui.notes}`);
+        if (manifest.ui?.notes) {
+          const singleLineNote = collapseInlineWhitespace(manifest.ui.notes);
+          sectionLines.push("", `- **Inspection notes:** ${safeInlineCode(singleLineNote)}`);
         }
       }
     }
 
     const expectedReportInner = sectionLines.join("\n");
     const prTitle =
-      flags.title || verifiedBundles[verifiedBundles.length - 1]?.subject || headBranch;
+      validatedExplicitTitle ||
+      collapseInlineWhitespace(verifiedBundles[verifiedBundles.length - 1]?.subject || headBranch);
     scanPublicTextPrivacy(prTitle, "pr_title");
+
+    const defaultGeneratedSummary = verifiedBundles
+      .map(
+        (b) =>
+          `- ${safeInlineCode(collapseInlineWhitespace(b.subject))}: ${safeInlineCode(collapseInlineWhitespace(b.manifest.why || ""))}`,
+      )
+      .join("\n");
+    const createSummaryText =
+      validatedSummary !== null
+        ? `${safeFenceForText(validatedSummary)}text\n${validatedSummary}\n${safeFenceForText(validatedSummary)}`
+        : defaultGeneratedSummary;
+
+    const applyTrustedUrlsToInner = (bodyUrlsMap) => {
+      let inner = expectedReportInner;
+      for (const [altTag, url] of bodyUrlsMap.entries()) {
+        if (trustedReceipts.get(receiptSlotKey(effectiveHost, repoSlug, altTag)) === url) {
+          inner = inner.replaceAll(`![${altTag}](./${altTag}.png)`, `![${altTag}](${url})`);
+          inner = inner.replaceAll(`![${altTag}](./${altTag}.jpg)`, `![${altTag}](${url})`);
+          inner = inner.replaceAll(`![${altTag}](./${altTag}.webp)`, `![${altTag}](${url})`);
+        }
+      }
+      return inner;
+    };
 
     // Batch attachments in <= MAX_ATTACH_PER_CALL chunks from cwd=stageDir so ./<fileName> resolves on all gh >= 2.99+
     const batches = [];
@@ -1280,27 +2359,24 @@ async function cmdPublishPr(argv) {
 
     for (let bIdx = 0; bIdx < batches.length; bIdx++) {
       const batch = batches[bIdx];
-      const currentHosted = parseExistingHostedUiUrls(latestBody || "");
-      let batchInner = expectedReportInner;
-      for (const [altTag, url] of currentHosted.entries()) {
-        batchInner = batchInner.replaceAll(`![${altTag}](./${altTag}.png)`, `![${altTag}](${url})`);
-        batchInner = batchInner.replaceAll(`![${altTag}](./${altTag}.jpg)`, `![${altTag}](${url})`);
-        batchInner = batchInner.replaceAll(`![${altTag}](./${altTag}.webp)`, `![${altTag}](${url})`);
-      }
-
-      const bodyText = mergeReportBlockIntoBody(
-        latestBody,
-        flags.summary || verifiedBundles.map((b) => `- ${b.subject}: ${b.manifest.why}`).join("\n"),
-        flags.closes,
-        batchInner,
-      );
-      scanPublicTextPrivacy(bodyText, "rendered_pr_body");
-
       const bodyFile = path.join(stageDir, "pr_body.md");
-      fs.writeFileSync(bodyFile, bodyText, "utf8");
       const attachArgs = batch.flatMap((item) => ["--attach", `./${item.fileName}`]);
+      const wasEdit = Boolean(targetPrNumber);
+      let preInvokeUrls;
+      let canRecordReceipts = false;
 
-      if (!targetPrNumber) {
+      if (!wasEdit) {
+        preInvokeUrls = parseExistingHostedUiUrls(latestBody || "", effectiveHost);
+        const batchInner = applyTrustedUrlsToInner(preInvokeUrls);
+        const bodyText = mergeReportBlockIntoBody(
+          latestBody,
+          createSummaryText,
+          flags.closes,
+          batchInner,
+        );
+        scanPublicTextPrivacy(bodyText, "rendered_pr_body");
+        fs.writeFileSync(bodyFile, bodyText, "utf8");
+
         lastGhRes = invokeGhCli(
           stageDir,
           [
@@ -1319,18 +2395,34 @@ async function cmdPublishPr(argv) {
             ...attachArgs,
           ],
           ghOverride,
+          effectiveHost,
         );
         const discovered = findOpenPrByPair();
         if (discovered) {
+          assertPrMatchesTarget(discovered, "Created");
           targetPrNumber = discovered.number;
           latestBody = discovered.body;
+          const discBlock = extractSingleReportBlock(latestBody || "");
+          const reportMatchesOurs =
+            Boolean(discBlock) &&
+            normalizeHostedUrlsForComparison(discBlock.inner, expectedUiAltTags) ===
+              normalizeHostedUrlsForComparison(expectedReportInner, expectedUiAltTags);
+          const stdoutMentionsCreatedUrl =
+            typeof discovered.url === "string" &&
+            discovered.url.length > 0 &&
+            String(lastGhRes.stdout || "").includes(discovered.url);
+          canRecordReceipts =
+            reportMatchesOurs && (lastGhRes.status === 0 || stdoutMentionsCreatedUrl);
         }
       } else {
         const freshBeforeEdit = viewPrByNumber(targetPrNumber);
-        if (freshBeforeEdit) latestBody = freshBeforeEdit.body;
+        assertPrMatchesTarget(freshBeforeEdit, "Pre-edit");
+        latestBody = freshBeforeEdit.body;
+        preInvokeUrls = parseExistingHostedUiUrls(latestBody || "", effectiveHost);
+        const batchInner = applyTrustedUrlsToInner(preInvokeUrls);
         const refreshedBody = mergeReportBlockIntoBody(
           latestBody,
-          flags.summary,
+          createSummaryText,
           flags.closes,
           batchInner,
         );
@@ -1349,9 +2441,37 @@ async function cmdPublishPr(argv) {
             ...attachArgs,
           ],
           ghOverride,
+          effectiveHost,
         );
+        if (lastGhRes.status !== 0) {
+          throw new Error(
+            `gh pr edit #${targetPrNumber} failed (exit ${lastGhRes.status}): ${(lastGhRes.stderr || lastGhRes.stdout || "").trim()}`,
+          );
+        }
         const afterBatchView = viewPrByNumber(targetPrNumber);
-        if (afterBatchView) latestBody = afterBatchView.body;
+        assertPrMatchesTarget(afterBatchView, "Post-edit");
+        latestBody = afterBatchView.body;
+        canRecordReceipts = true;
+      }
+
+      if (canRecordReceipts) {
+        const uploadedUrls = parseExistingHostedUiUrls(latestBody || "", effectiveHost);
+        let recordedAny = false;
+        for (const item of batch) {
+          const afterUrl = uploadedUrls.get(item.altTag);
+          const beforeUrl = preInvokeUrls.get(item.altTag);
+          if (afterUrl && afterUrl !== beforeUrl) {
+            await verifyHostedAssetBytes(afterUrl, expectedUiDigests.get(item.altTag), {
+              allowPrivateUnverifiedAssets: Boolean(flags["allow-private-unverified-assets"]),
+              effectiveHost,
+            });
+            trustedReceipts.set(receiptSlotKey(effectiveHost, repoSlug, item.altTag), afterUrl);
+            recordedAny = true;
+          }
+        }
+        if (recordedAny) {
+          saveTrustedUploadReceipts(commonDir, trustedReceipts);
+        }
       }
     }
 
@@ -1362,19 +2482,7 @@ async function cmdPublishPr(argv) {
     }
 
     const remotePr = viewPrByNumber(targetPrNumber);
-    if (!remotePr) {
-      throw new Error(`Could not read back PR #${targetPrNumber} from GitHub.`);
-    }
-    if (remotePr.baseRefName && remotePr.baseRefName !== baseBranch) {
-      throw new Error(
-        `Remote PR #${remotePr.number} targets base "${remotePr.baseRefName}", expected "${baseBranch}".`,
-      );
-    }
-    if (remotePr.headRefOid !== headOid) {
-      throw new Error(
-        `Remote PR #${remotePr.number} headRefOid (${remotePr.headRefOid}) != local HEAD (${headOid}).`,
-      );
-    }
+    assertPrMatchesTarget(remotePr, "Remote", { requireOpen: true });
 
     const remoteBlock = extractSingleReportBlock(remotePr.body || "");
     if (!remoteBlock) {
@@ -1392,18 +2500,28 @@ async function cmdPublishPr(argv) {
       );
     }
 
-    const remoteHosted = parseExistingHostedUiUrls(remotePr.body || "");
+    const remoteHosted = parseExistingHostedUiUrls(remotePr.body || "", effectiveHost);
     for (const altTag of expectedUiAltTags) {
-      if (!remoteHosted.has(altTag)) {
+      const remoteUrl = remoteHosted.get(altTag);
+      if (!remoteUrl) {
         throw new Error(
           `PARTIAL_PUBLISH_INCOMPLETE: PR ${remotePr.url} is missing hosted asset URL for ${altTag}.`,
         );
       }
+      if (trustedReceipts.get(receiptSlotKey(effectiveHost, repoSlug, altTag)) !== remoteUrl) {
+        throw new Error(
+          `Remote PR ${remotePr.url} hosted asset URL for ${altTag} does not match local upload receipt.`,
+        );
+      }
+      await verifyHostedAssetBytes(remoteUrl, expectedUiDigests.get(altTag), {
+        allowPrivateUnverifiedAssets: Boolean(flags["allow-private-unverified-assets"]),
+        effectiveHost,
+      });
     }
 
     if (
-      normalizeHostedUrlsForComparison(remoteBlock.inner) !==
-      normalizeHostedUrlsForComparison(expectedReportInner)
+      normalizeHostedUrlsForComparison(remoteBlock.inner, expectedUiAltTags) !==
+      normalizeHostedUrlsForComparison(expectedReportInner, expectedUiAltTags)
     ) {
       throw new Error(
         `Remote PR #${remotePr.number} evidence block content drifted from expected verified report.`,
@@ -1420,7 +2538,8 @@ async function cmdPublishPr(argv) {
       process.stdout.write(
         `PUBLISH_PR_PARTIAL_GAPS number=${remotePr.number} url=${remotePr.url} verified=${verifiedBundles.length}/${commitOids.length}\n`,
       );
-      process.exit(4);
+      process.exitCode = 4;
+      return;
     }
 
     process.stdout.write(
@@ -1432,7 +2551,7 @@ async function cmdPublishPr(argv) {
 }
 
 async function cmdStage(argv) {
-  const { flags, multi } = parseFlags(argv);
+  const { flags, multi } = parseFlags(argv, "stage");
   if (multi.files.length === 0) {
     throw new Error("`stage` requires `--files <path1> [path2 ...]`.");
   }
@@ -1459,6 +2578,14 @@ async function cmdStage(argv) {
         throw new Error(`Staging symlink "${rel}" is forbidden; stage regular files only.`);
       }
     }
+    if (parentOid) {
+      const parentDirEntry = git(repoRoot, ["ls-tree", "-d", parentOid, "--", rel]).stdout.trim();
+      if (parentDirEntry) {
+        throw new Error(
+          `Directory staging ("${rel}") is forbidden because "${rel}" was a directory in HEAD and staging it can sweep child deletions; list explicit file paths.`,
+        );
+      }
+    }
     return rel;
   });
 
@@ -1477,7 +2604,7 @@ async function cmdStage(argv) {
     git(repoRoot, ["rm", "-r", "-f", "--cached", "-q", "--ignore-unmatch", "."]);
   }
 
-  git(repoRoot, ["add", "--", ...requestedNorm]);
+  git(repoRoot, ["--literal-pathspecs", "add", "--", ...requestedNorm]);
   const postStaged = listStagedPaths(repoRoot, parentOid);
   for (const sFile of postStaged) {
     for (const pat of FORBIDDEN_STAGE_PATTERNS) {
@@ -1500,9 +2627,10 @@ async function cmdStage(argv) {
 }
 
 async function cmdInit(argv) {
-  const { flags } = parseFlags(argv);
+  const { flags } = parseFlags(argv, "init");
   const mode = flags.mode || "snapshot";
   if (!ALLOWED_MODES.has(mode)) throw new Error(`Invalid --mode "${mode}".`);
+  const validatedCase = flags.case ? assertSingleLineStructuralField(flags.case, "case", 240) : "";
 
   const { repoRoot, gitDir, parentOid } = resolveRepoContext();
   checkUnmergedEntries(repoRoot);
@@ -1533,7 +2661,7 @@ async function cmdInit(argv) {
     tree_oid: treeOid,
     staged_files: [...stagedFiles].sort(),
     verification_mode: mode,
-    case_name: flags.case || "",
+    case_name: validatedCase,
     overlay: [],
     before: null,
     after: null,
@@ -1546,7 +2674,7 @@ async function cmdInit(argv) {
 }
 
 async function cmdRecord(argv) {
-  const { flags, multi, cmdAfterDashDash } = parseFlags(argv);
+  const { flags, multi, cmdAfterDashDash } = parseFlags(argv, "record");
   const phase = flags.phase;
   if (phase !== "before" && phase !== "after") {
     throw new Error("`record` requires `--phase before|after`.");
@@ -1554,6 +2682,9 @@ async function cmdRecord(argv) {
   if (!cmdAfterDashDash || cmdAfterDashDash.length === 0) {
     throw new Error("`record` requires `-- <executable> [args...]`.");
   }
+  const timeoutMs = flags["timeout-ms"]
+    ? assertPositiveIntFlag(flags["timeout-ms"], "timeout-ms")
+    : 300000;
 
   const { repoRoot, gitDir, parentOid } = resolveRepoContext();
   const { runDir, statePath, state } = loadRunState(gitDir, flags["run-id"]);
@@ -1611,11 +2742,7 @@ async function cmdRecord(argv) {
       }
     }
 
-    const result = await runCommandCapture(
-      cmdAfterDashDash,
-      execDir,
-      flags["timeout-ms"] ? Number(flags["timeout-ms"]) : 300000,
-    );
+    const result = await runCommandCapture(cmdAfterDashDash, execDir, timeoutMs);
     if (result.timedOut) {
       throw new Error(`Command timed out after ${result.durationMs}ms.`);
     }
@@ -1672,12 +2799,23 @@ async function cmdRecord(argv) {
 }
 
 async function cmdAttachUi(argv) {
-  const { flags } = parseFlags(argv);
+  const { flags } = parseFlags(argv, "attach-ui");
   if (!flags.after || !flags.route || !flags.viewport) {
     throw new Error("`attach-ui` requires `--after <imgPath> --route <route> --viewport <WxH>`.");
   }
   if (!/^\d+x\d+$/i.test(flags.viewport)) {
     throw new Error(`Invalid --viewport "${flags.viewport}" (expected WxH, e.g., 1440x900).`);
+  }
+  const cleanRoute = assertSingleLineStructuralField(flags.route, "route", 240);
+  const cleanTheme = assertSingleLineStructuralField(flags.theme || "default", "theme", 64);
+  const cleanNewReason = flags["new-surface-reason"]
+    ? assertSingleLineStructuralField(flags["new-surface-reason"], "new-surface-reason", 160)
+    : null;
+  const cleanNotes = flags.notes
+    ? assertSingleLineStructuralField(flags.notes, "notes", 240)
+    : "";
+  if (cleanNotes) {
+    scanPublicTextPrivacy(cleanNotes, "ui_notes");
   }
 
   const { gitDir } = resolveRepoContext();
@@ -1720,10 +2858,10 @@ async function cmdAttachUi(argv) {
       width: afterInfo.width,
     },
     before: beforeEntry,
-    new_surface_reason: flags["new-surface-reason"] || null,
-    notes: flags.notes || "",
-    route: flags.route,
-    theme: flags.theme || "default",
+    new_surface_reason: cleanNewReason,
+    notes: cleanNotes,
+    route: cleanRoute,
+    theme: cleanTheme,
     viewport: flags.viewport.toLowerCase(),
   };
   saveRunState(statePath, state);
@@ -1732,7 +2870,7 @@ async function cmdAttachUi(argv) {
   );
 }
 
-function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
+function buildValidatedCommitPlan(repoCtx, runBundle, flags, extraReviewers = []) {
   const { repoRoot, parentOid } = repoCtx;
   const { runDir, state } = runBundle;
 
@@ -1740,17 +2878,18 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
   if (!ALLOWED_TYPES.has(type)) {
     throw new Error(`Invalid or missing --type "${type}". Allowed: ${[...ALLOWED_TYPES].join(", ")}`);
   }
-  const title = (flags.title || "").trim();
-  const why = flags["why-file"]
-    ? fs.readFileSync(path.resolve(flags["why-file"]), "utf8").trim()
-    : (flags.why || "").trim();
+  const title = assertSingleLineStructuralField(flags.title || "", "title", 72);
   if (!title) throw new Error("`--title` is required.");
-  if (title.length > 72 || /\r|\n/.test(title)) {
-    throw new Error("`--title` must be a single line <= 72 chars.");
-  }
+  const rawWhy = flags["why-file"]
+    ? fs.readFileSync(path.resolve(flags["why-file"]), "utf8").replace(/^\uFEFF/, "")
+    : flags.why || "";
+  const why = assertMultilineAuthorField(rawWhy, "why", 4000);
   if (why.length < 20) {
     throw new Error("`--why` must provide a substantive causal explanation (>= 20 chars).");
   }
+  const cleanGranularity = flags.granularity
+    ? assertMultilineAuthorField(flags.granularity, "granularity", 1200)
+    : null;
 
   checkUnmergedEntries(repoRoot);
   checkHiddenIndexFlags(repoRoot);
@@ -1792,13 +2931,27 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
   }
 
   const touchesUiPath = liveStagedFiles.some((f) => UI_EXT_RE.test(f));
-  if ((type === "ui" || (touchesUiPath && !flags["no-ui-impact"])) && !state.ui) {
+  let noUiImpactReason = null;
+  if (flags["no-ui-impact"] !== undefined) {
+    if (state.ui || type === "ui") {
+      throw new Error(
+        '`--no-ui-impact` cannot be combined with `attach-ui` screenshots or `--type ui`.',
+      );
+    }
+    noUiImpactReason = assertSingleLineStructuralField(flags["no-ui-impact"], "no-ui-impact", 200);
+    if (noUiImpactReason.length < 8) {
+      throw new Error("`--no-ui-impact` must state a concrete single-line reason (>= 8 chars).");
+    }
+  }
+  if ((type === "ui" || (touchesUiPath && !noUiImpactReason)) && !state.ui) {
     throw new Error(
       `Staged UI changes require \`attach-ui\` visual proof (or explicit \`--no-ui-impact "<reason>"\` if non-visual).`,
     );
   }
 
-  const maxLines = flags["max-lines"] ? Number(flags["max-lines"]) : 3;
+  const maxLines = flags["max-lines"]
+    ? assertPositiveIntFlag(flags["max-lines"], "max-lines", 50)
+    : 3;
   const afterSel = selectQuotesFromPhase(runDir, "after", state.after, flags["pick-after"], maxLines);
   assertNotSkippedOrZeroTests(afterSel.allLines, afterSel.quotes, "After");
 
@@ -1828,8 +2981,26 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
       ? "snapshot"
       : "workspace";
 
-  const caseName = (flags.case || state.case_name || title).trim();
-  const scope = flags.scope ? flags.scope.trim() : null;
+  const caseName = assertSingleLineStructuralField(
+    flags.case || state.case_name || title,
+    "case",
+    240,
+  );
+  const scope = flags.scope ? assertSingleLineStructuralField(flags.scope, "scope", 64) : null;
+  let cleanUiNotes = "";
+  if (state.ui) {
+    assertSingleLineStructuralField(state.ui.route, "ui.route", 240);
+    assertSingleLineStructuralField(state.ui.theme, "ui.theme", 64);
+    if (state.ui.new_surface_reason) {
+      assertSingleLineStructuralField(state.ui.new_surface_reason, "ui.new_surface_reason", 160);
+    }
+    if (state.ui.notes) {
+      cleanUiNotes = assertSingleLineStructuralField(state.ui.notes, "ui.notes", 240);
+    }
+  }
+  const reviewers = normalizeReviewers(extraReviewers);
+  const schemaVersion =
+    reviewers.length > 0 || Boolean(noUiImpactReason) || Boolean(cleanUiNotes) ? 2 : 1;
 
   const canonicalPayload = {
     after: {
@@ -1851,9 +3022,11 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
         }
       : null,
     case_name: caseName,
+    ...(noUiImpactReason ? { no_ui_impact_reason: noUiImpactReason } : {}),
     overlay: state.overlay || [],
     parent_oid: parentOid,
-    schema_version: 1,
+    ...(reviewers.length > 0 ? { reviewers } : {}),
+    schema_version: schemaVersion,
     scope,
     tree_oid: liveTree,
     type,
@@ -1862,6 +3035,7 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
           after_sha256: state.ui.after.sha256,
           before_sha256: state.ui.before ? state.ui.before.sha256 : null,
           new_surface_reason: state.ui.new_surface_reason,
+          ...(cleanUiNotes ? { notes: cleanUiNotes } : {}),
           route: state.ui.route,
           theme: state.ui.theme,
           viewport: state.ui.viewport,
@@ -1871,9 +3045,6 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
   };
 
   const evidenceId = computeEvidenceId(canonicalPayload);
-  if (/Evidence-ID:/i.test(why) || /Evidence-ID:/i.test(flags.granularity || "")) {
-    throw new Error("Author text fields must not inject synthetic `Evidence-ID:` trailers.");
-  }
 
   const header = scope ? `${type}(${scope}): ${title}` : `${type}: ${title}`;
   let baselineDesc = !parentOid
@@ -1889,8 +3060,8 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
   }
 
   const msgLines = [header, "", "Why:", why];
-  if (flags.granularity) {
-    msgLines.push("", "Granularity:", flags.granularity.trim());
+  if (cleanGranularity) {
+    msgLines.push("", "Granularity:", cleanGranularity);
   }
   msgLines.push(
     "",
@@ -1917,6 +3088,12 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
   }
 
   msgLines.push("");
+  for (const r of reviewers) {
+    msgLines.push(formatReviewerTrailer(r));
+  }
+  if (noUiImpactReason && !state.ui) {
+    msgLines.push(`UI-Impact: none (${noUiImpactReason})`);
+  }
   if (state.ui) {
     const bRef = state.ui.before
       ? `sha256:${state.ui.before.sha256.slice(0, 16)}`
@@ -1934,14 +3111,27 @@ function buildValidatedCommitPlan(repoCtx, runBundle, flags) {
     scanPublicTextPrivacy(state.ui.notes, "ui_notes");
   }
 
-  return { canonicalPayload, commitMessage, evidenceId, liveStagedFiles, liveTree, parentOid };
+  return {
+    canonicalPayload,
+    cleanGranularity,
+    cleanUiNotes,
+    commitMessage,
+    evidenceId,
+    liveStagedFiles,
+    liveTree,
+    noUiImpactReason,
+    parentOid,
+    reviewers,
+    title,
+    why,
+  };
 }
 
 async function cmdVerify(argv) {
-  const { flags } = parseFlags(argv);
+  const { flags, multi } = parseFlags(argv, "verify");
   const repoCtx = resolveRepoContext();
   const runBundle = loadRunState(repoCtx.gitDir, flags["run-id"]);
-  const plan = buildValidatedCommitPlan(repoCtx, runBundle, flags);
+  const plan = buildValidatedCommitPlan(repoCtx, runBundle, flags, multi["reviewed-by"]);
   process.stdout.write(
     `VERIFY_OK evidence_id=${plan.evidenceId} tree=${plan.liveTree}\n---\n${plan.commitMessage}`,
   );
@@ -1962,10 +3152,10 @@ export function parseCommitObjectHeaderAndBody(rawCommitObj) {
 }
 
 async function cmdCommit(argv) {
-  const { flags } = parseFlags(argv);
+  const { flags, multi } = parseFlags(argv, "commit");
   const repoCtx = resolveRepoContext();
   const runBundle = loadRunState(repoCtx.gitDir, flags["run-id"]);
-  const plan = buildValidatedCommitPlan(repoCtx, runBundle, flags);
+  const plan = buildValidatedCommitPlan(repoCtx, runBundle, flags, multi["reviewed-by"]);
 
   const msgFile = path.join(runBundle.runDir, "COMMIT_EDITMSG");
   writeFileAtomic(msgFile, Buffer.from(plan.commitMessage, "utf8"));
@@ -1991,7 +3181,7 @@ async function cmdCommit(argv) {
   }
   if (actualTree !== plan.liveTree) {
     throw new Error(
-      `Post-commit drift detected: commit ${commitOid.slice(0, 12)} recorded tree ${actualTree} instead of verified tree ${plan.liveTree} (likely modified by a pre-commit hook). Do NOT publish unverified drift.`,
+      `Post-commit drift detected: commit ${commitOid.slice(0, 12)} recorded tree ${actualTree} instead of verified tree ${plan.liveTree} (likely modified by a pre-commit hook). Run \`git reset --soft HEAD~1\` before retrying.`,
     );
   }
   if (actualParent !== plan.parentOid) {
@@ -2000,7 +3190,7 @@ async function cmdCommit(argv) {
   if (bodyBlock !== plan.commitMessage) {
     scanPublicTextPrivacy(bodyBlock, "post_hook_commit_body");
     throw new Error(
-      `Post-commit message drift detected on ${commitOid.slice(0, 12)}: a commit-msg hook altered the verified commit message.`,
+      `Post-commit message drift detected on ${commitOid.slice(0, 12)}: a commit-msg hook altered the verified commit message. Run \`git reset --soft HEAD~1\` and disable message-mutating hooks.`,
     );
   }
 
@@ -2014,13 +3204,14 @@ async function cmdCommit(argv) {
     commit_oid: commitOid,
     committed_at: new Date().toISOString(),
     evidence_id: plan.evidenceId,
-    granularity: flags.granularity ? flags.granularity.trim() : null,
+    granularity: plan.cleanGranularity,
+    ...(plan.reviewers.length > 0 ? { reviewers: plan.reviewers } : {}),
     staged_files: plan.liveStagedFiles,
-    title: flags.title.trim(),
-    ui_details: runBundle.state.ui,
-    why: flags["why-file"]
-      ? fs.readFileSync(path.resolve(flags["why-file"]), "utf8").trim()
-      : flags.why.trim(),
+    title: plan.title,
+    ui_details: runBundle.state.ui
+      ? { ...runBundle.state.ui, notes: plan.cleanUiNotes }
+      : null,
+    why: plan.why,
   };
 
   for (const f of ["before.stdout.log", "before.stderr.log", "after.stdout.log", "after.stderr.log"]) {
@@ -2056,22 +3247,35 @@ async function cmdCommit(argv) {
 }
 
 async function cmdInspect(argv) {
+  if (argv.some((a) => a === "-h" || a === "--help" || a === "--help=true")) {
+    printHelp();
+    return;
+  }
+  if (argv.length > 1 || (argv[0] && argv[0].startsWith("-"))) {
+    throw new Error("Usage: node proof_commit.mjs inspect [<commit-oid>]");
+  }
   const targetRef = argv[0] || "HEAD";
   const { repoRoot, commonDir } = resolveRepoContext();
-  const oid = git(repoRoot, ["rev-parse", targetRef]).stdout.trim();
+  const oid = git(repoRoot, ["rev-parse", "--verify", "--end-of-options", `${targetRef}^{commit}`]).stdout.trim();
   const mapPath = path.join(commonDir, "proof-commit", "commits", `${oid}.json`);
   if (!fs.existsSync(mapPath)) {
     throw new Error(`No local proof-commit record mapped for commit ${oid}.`);
   }
   const mapping = JSON.parse(fs.readFileSync(mapPath, "utf8"));
+  assertValidEvidenceIdFormat(mapping.evidence_id, "mapping.evidence_id");
   const digestHex = mapping.evidence_id.replace(/^sha256:/, "");
-  const manifestPath = path.join(commonDir, "proof-commit", "bundles", digestHex, "manifest.json");
+  const bundlesRoot = path.resolve(commonDir, "proof-commit", "bundles");
+  const bundleDir = path.resolve(bundlesRoot, digestHex);
+  if (path.dirname(bundleDir) !== bundlesRoot) {
+    throw new Error("Bundle directory containment check failed.");
+  }
+  const manifestPath = path.join(bundleDir, "manifest.json");
   process.stdout.write(fs.readFileSync(manifestPath, "utf8"));
 }
 
 async function main() {
   const [sub, ...rest] = process.argv.slice(2);
-  if (!sub || sub === "--help" || sub === "-h") {
+  if (!sub || sub === "--help" || sub === "-h" || sub === "--help=true") {
     printHelp();
     return;
   }
