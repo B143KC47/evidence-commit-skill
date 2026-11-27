@@ -28,11 +28,11 @@
 
 ---
 
-## 理念宣传片 — 42 秒看懂为什么需要 Evidence Commit
+## 理念宣传片 — 68 秒看懂为什么需要 Evidence Commit
 
-https://github.com/user-attachments/assets/e7eb23fe-38a0-433b-a3b0-e37b1c632713
+https://github.com/user-attachments/assets/5ea90264-f838-40d0-aca1-8581c10a683c
 
-*1080p60 · BT.709 标准色域（点击播放器音量键可开启极简原声）。直观展示“工作区绿灯、暂存树坏代码”的隐蔽错位、Tidy First 原子拆分准则，以及从快照字节取证到 GitHub PR 视觉对比卡片的完整闭环。*
+*1080p · BT.709（建议开启声音）。卡点切换的地平线蒙太奇、一句打字挑战——“Prove that this commit actually fixed the bug.”——十四种 AI 提交的典型失败，随后是自绘式幕后演示：暂存树 `T`、在父提交 `P` 上用 `--overlay` 采集 Before、字节级精确的 After 引文，以及自带证据的 GitHub PR。片中运行为演示样例，所有输出行均采用 `proof_commit.mjs` 的真实格式。*
 
 ---
 

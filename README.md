@@ -28,11 +28,11 @@
 
 ---
 
-## Launch Film — Our Philosophy in 42 Seconds
+## Launch Film — Our Philosophy in 68 Seconds
 
-https://github.com/user-attachments/assets/e7eb23fe-38a0-433b-a3b0-e37b1c632713
+https://github.com/user-attachments/assets/5ea90264-f838-40d0-aca1-8581c10a683c
 
-*1080p60 · BT.709 · Unmute for minimal studio audio. Illustrates why working-directory tests lie about staged Git commits, how Tidy First partitions tangled diffs, and how `proof_commit.mjs` binds raw execution bytes and UI visuals to Git objects and GitHub Pull Requests.*
+*1080p · BT.709 · Sound on. Beat-cut horizons, a typed challenge — "Prove that this commit actually fixed the bug." — fourteen ways AI commits fail, then a self-drawing making-of: staged tree `T`, an `--overlay` Before on `P`, byte-exact After quotes, and a GitHub PR carrying its own proof. On-screen runs are illustrative; every output line uses the real `proof_commit.mjs` format.*
 
 ---
 
