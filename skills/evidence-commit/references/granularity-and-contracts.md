@@ -11,7 +11,7 @@
 | **Lockfile, codegen, or schema sync caused by a change** | **Same commit as its cause** | If a clean checkout of `T` would fail install, drift on codegen, or break contract checks without the generated file, include it. Unrelated dependency upgrades belong in their own commit. |
 | **Multi-step database / protocol migration** | **Split by deployable compatibility states** | Commit 1: additive schema; Commit 2: dual-read/write migration; Commit 3: drop legacy field—each independently verifiable. |
 | **Typo in published docs vs typo in uncommitted feature** | **Context-dependent** | Fixing a broken published install command is a complete user-visible `docs` fix; fixing a typo in code not yet committed folds into that feature commit. |
-| **Multi-commit feature stack** | **Ordered atomic prefixes** | Every prefix commit must leave the repo buildable and passing tests (e.g., Commit 1: standalone local CLI + tests; Commit 2: remote GitHub PR publisher + tests). |
+| **Multi-commit feature stack** | **Ordered atomic prefixes** | Every prefix commit must leave the repo buildable and passing tests (e.g., Commit 1: standalone local CLI + tests; Commit 2: remote GitHub PR publisher + tests). Prefer merge commits or fast-forward merges when landing stacks if you want original `commit_oid`, `parent_oid`, and `Evidence-ID` bindings preserved intact on `main` (rebasing preserves trailer text while rewriting `parent_oid`/`commit_oid`; squash-merging retains the PR report body on GitHub while collapsing individual commit objects). |
 
 ---
 
@@ -22,7 +22,7 @@ Validating the working directory (`cwd`) and then running `git commit` has three
 2. **Hidden Flag Drift:** Files marked `assume-unchanged` (`h`) or `skip-worktree` (`S`) appear clean under `git diff --quiet` while diverging on disk from `T = git write-tree`.
 3. **Skipped Test False Positive:** Test runners exit `0` when all selected tests are marked `SKIP` or `TODO` (`# pass 0`).
 
-`proof_commit.mjs` closes all three:
+`proof_commit.mjs` guards against these failure modes:
 - Freezes `P = rev-parse HEAD` (`null` on unborn root) and `T = git write-tree`.
 - Materializes `T` (and `P` + declared `--overlay` test files for `Before`) using a private `GIT_INDEX_FILE` (`git read-tree` + `git checkout-index --all --prefix=...`) into `os.tmpdir()` **outside** the repository tree so ESM/Python module resolution cannot accidentally climb into parent directories.
 - Rejects `After` runs with zero passing assertions or selected `SKIP`/`TODO`-only lines.
@@ -30,15 +30,16 @@ Validating the working directory (`cwd`) and then running `git commit` has three
 
 ---
 
-## 3. Canonical `Evidence-ID` Specification (`schema_version: 1`)
+## 3. Canonical `Evidence-ID` Specification (`schema_version: 1` / `2`)
 
-`Evidence-ID` is `sha256:<hex>` of the UTF-8 canonical JSON serialization (keys sorted lexicographically at every object level, arrays in recorded order, no whitespace, `null` for absent root parent, omitting `evidence_id`, `commit_oid`, and post-commit remote URLs) of:
+`Evidence-ID` is `sha256:<hex>` of the UTF-8 canonical JSON serialization (keys sorted lexicographically at every object level, `quotes` and `overlay` arrays in recorded order, `reviewers` sorted canonically, no whitespace, `null` for absent root parent, omitting `evidence_id`, `commit_oid`, and post-commit remote URLs). Commits without v2 optional fields (`reviewers`, `no_ui_impact_reason`, `ui.notes`) use `schema_version: 1`; commits recording any of those fields use `schema_version: 2`:
 
 ```json
 {
   "after": {
-    "argv": ["node", "--test", "tests/example.test.mjs"],
+    "argv_display": "node --test tests/example.test.mjs",
     "exit_code": 0,
+    "mode": "snapshot",
     "quotes": [
       { "end_byte": 42, "line": 3, "start_byte": 12, "stream": "stdout", "text": "ok 1 - accepts zero" }
     ],
@@ -49,7 +50,10 @@ Validating the working directory (`cwd`) and then running `git commit` has three
   "case_name": "Zero quantity accepted",
   "overlay": [],
   "parent_oid": null,
-  "schema_version": 1,
+  "reviewers": [
+    { "harness": "Antigravity CLI", "model": "claude-opus-5-5-high" }
+  ],
+  "schema_version": 2,
   "scope": "parser",
   "tree_oid": "...",
   "type": "feat",
@@ -57,6 +61,7 @@ Validating the working directory (`cwd`) and then running `git commit` has three
   "verification_mode": "snapshot"
 }
 ```
+*(When no `--reviewed-by`, `--no-ui-impact`, or `ui.notes` values are recorded on a commit, those keys are omitted and `schema_version: 1` is emitted so v1 canonical digests remain 100% backwards-compatible. When `--reviewed-by` is provided, printable-ASCII entries (up to 16) are sorted deterministically on `(model.toLowerCase(), harness.toLowerCase())` (preferring lowercase model identifiers on case-only ties) and deduplicated case-insensitively on `(model, harness)` independent of argument order, rendered as `AI-Reviewed-By: <model> via <harness>` in the Git commit trailer, and rendered as ``- **AI-Reviewed-By:** `<model>` via `<harness>` `` in the commit section of the GitHub PR verification report. Branch-level reviews passed to `publish-pr --reviewed-by` are stored locally under `<git-common-dir>/proof-commit/pr/<headOid>.json` keyed by `host/owner/repo#baseBranch` and rendered as ``- **Branch AI-Reviewed-By:** `<model>` via `<harness>` _(self-attested)_``.)*
 
 ### Verbatim Quote Integrity & Privacy Rules
 - Every `  | <line>` in the commit message corresponds to exact bytes `[start_byte, end_byte)` in the captured stream (excluding `\r\n` or `\n`), with **no** `.trim()`, tab substitution, or silent `[REDACTED]` mutation.

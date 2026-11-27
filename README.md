@@ -141,7 +141,7 @@ To instruct your agent to activate the skill consistently before any `git commit
 Assuming `evidence-commit` is installed at `.agents/skills/evidence-commit` on a feature branch (e.g., `git switch -c fix/zero-quantity`):
 
 ```bash
-# 1. Stage explicit repository-relative paths (`.`, `..`, `*`, `?`, and `.env*` are blocked)
+# 1. Stage explicit repository-relative paths (`.`, `..`, `*`, `?`, `:`, and `.env*` are blocked)
 node .agents/skills/evidence-commit/scripts/proof_commit.mjs stage \
   --files src/validator.mjs tests/validator.test.mjs
 
@@ -176,6 +176,13 @@ node .agents/skills/evidence-commit/scripts/proof_commit.mjs publish-pr \
   --title "fix(validator): allow zero quantity in boundary check"
 ```
 
+When an **independent** reviewer model actually audited the change (never record unexecuted reviews or the authoring session itself), append `--reviewed-by "<model> via <harness>"` to `commit` (bound into `Evidence-ID` as immutable self-attested provenance) or `publish-pr` (pass `--allow-custom-origin --repo host/owner/repo` for GitHub Enterprise remotes, or `--allow-private-unverified-assets` on private repositories with cookie-gated attachments):
+
+```bash
+--reviewed-by "claude-opus-5-5-high via Antigravity CLI" \
+--reviewed-by "gpt-6.2-astra (xhigh) via Codex CLI"
+```
+
 When a commit modifies UI files (`--type ui` or visual component/stylesheet changes, where visual proof is required unless `--no-ui-impact` is explained), bind `Before | After` screenshots prior to `commit`:
 
 ```bash
@@ -195,7 +202,7 @@ node .agents/skills/evidence-commit/scripts/proof_commit.mjs attach-ui \
 - **Zero-Assertion & Skip Trap Rejection**: Rejects `After` verification at commit time when test output reports `# pass 0` / `ℹ pass 0` / `0 passed` or when selected lines contain only `SKIP` / `TODO` directives.
 - **Byte-Exact Verbatim Quotes**: Every `  | <line>` quote maps to recorded raw byte offsets `[start_byte, end_byte)` without `.trim()` or paraphrasing; ANSI escapes (`\x1b`) and bare carriage-return overwrites (`\r`) are rejected.
 - **Local-Path & Credential Leak Scanner**: Hard-fails prior to committing or publishing if public commit/PR text contains normalized `os.homedir()` paths or high-confidence secret formats (`ghp_`, `gho_`, `github_pat_`, `sk-`, `AKIA`, `Bearer`, PEM private keys); privacy-scanner error diagnostics never echo matched secret values.
-- **PNG Structural Validation & GitHub PR Read-Back**: Validates PNG signature, positive `IHDR` dimensions, chunk CRC32 checksums (`zlib.crc32`), and `zlib` IDAT inflation while binding SHA-256 digests; uploads digest-named assets via `gh --attach`, preserves human PR notes outside bounded markers, and reads back the live GitHub PR to verify `headRefOid`, `baseRefName`, report body, and expected `https://` image references.
+- **PNG Structural Validation & GitHub PR Read-Back**: Validates PNG signature, positive `IHDR` dimensions, chunk CRC32 checksums (`zlib.crc32`), and bounded `zlib` IDAT inflation while binding SHA-256 digests; uploads digest-named assets via `gh --attach`, preserves human PR notes outside bounded markers, and reads back the live GitHub PR to verify same-repo `OPEN` state, `headRefOid`, `baseRefName`, `baseRefOid` commit-range consistency, report body, and SHA-256 byte-verified `https://` image attachments.
 
 ---
 

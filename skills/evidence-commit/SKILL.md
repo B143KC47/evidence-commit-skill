@@ -10,8 +10,6 @@ description: >-
 
 # Evidence Commit
 
-Let's think and work this out in a step by step way to be sure we have the correct answer. Make sure you are objective and rational.
-
 A commit is not `Ctrl+S`. Every commit in shared history must be a **revertable, bisectable, single-intent transition** accompanied by **causal rationale (`Why`)** and **tree-bound empirical proof (`Evidence`)**.
 
 ## 1. Decide Commit Worthiness & Granularity First
@@ -44,7 +42,7 @@ Never rely on commit-type prefixes alone—satisfy **every** contract implied by
 | **Feature (`feat`)** | Parent baseline capability/absence noted (`root: none` on initial commit) | Real entrypoint/acceptance test runs on `T` and verifies expected output |
 | **Refactor (`refactor`)** | Observable invariant measured on parent `P` | Same check runs on `T` demonstrating behavioral preservation |
 | **Performance (`perf`)** | Fixed-workload baseline measurement on `P` | Comparable measurement + correctness check on `T` |
-| **UI Change** | Screenshot + runtime check of same route/state/viewport on `P` (unless genuinely brand-new surface) | Matching screenshot + interaction/console assertion on `T` (`attach-ui`) |
+| **UI Change** | Prior screenshot of same route/state/viewport via `attach-ui --before` (plus runtime `Before` if fixing a behavioral UI bug) | Matching screenshot (`attach-ui --after`) + passing verification run on `T` |
 | **Docs / Test / Chore** | Broken command, coverage gap, or build rule stated | Executed command/test/package verification on `T` |
 
 ---
@@ -59,7 +57,7 @@ node <skill-dir>/scripts/proof_commit.mjs stage --files src/parser.mjs tests/par
 node <skill-dir>/scripts/proof_commit.mjs init --case "Zero quantity is accepted by order validator"
 ```
 
-### Step 2 — Record `Before` (Required for `fix`, `refactor`, `perf`, and Existing UI)
+### Step 2 — Record `Before` (Required for `fix`, `refactor`, and `perf`)
 If the regression test was newly added in staged tree `T`, pass `--overlay` so the exact staged test runs against unmodified parent `P`:
 ```bash
 node <skill-dir>/scripts/proof_commit.mjs record \
@@ -106,4 +104,11 @@ node <skill-dir>/scripts/proof_commit.mjs publish-pr \
   --title "fix(parser): allow zero quantity in boundary validation" \
   --closes 42
 ```
-`publish-pr` re-verifies every commit's Git object, `Evidence-ID`, raw log hashes, and PNG integrity across `base..HEAD`, uploads digest-bound `evc-<shortSha>-<before|after>-<sha256>` images from a clean staging working directory, preserves human PR notes outside its bounded report markers, recovers cleanly if a prior `--attach` upload partially succeeded, and verifies `headRefOid`, `baseRefName`, and exact report read-back on GitHub.
+`publish-pr` re-verifies every commit's Git object, `Evidence-ID`, raw log hashes, and PNG integrity across `base..HEAD`, verifies `origin` matches `--repo` on `github.com` (pass `--allow-custom-origin --repo host/owner/repo` for enterprise Git remotes while keeping `ls-remote` OID checks, or `--skip-push-check` for offline mock tests), uploads digest-bound `evc-<shortSha>-<before|after>-<sha256>` images from a clean staging working directory, verifies hosted screenshot bytes match each manifest's SHA-256 digest (pass `--allow-private-unverified-assets` on private repositories with cookie-gated attachments), preserves human PR notes outside its bounded report markers, recovers cleanly if a prior `--attach` upload partially succeeded, and verifies same-repo `OPEN` state, `headRefOid`, `baseRefName`, `baseRefOid` range consistency, and exact report read-back on GitHub.
+
+### Optional — Record Independent Reviewer Model + Harness Provenance
+When (and **only** when) a separate, independent model/agent review actually inspected the staged diff or branch—never record unexecuted reviews or the authoring session itself—append `--reviewed-by "<model> via <harness>"` (self-attested provenance; repeatable; also accepts `<model> @ <harness>` or `<model> [<harness>]`) to `commit` (emits `AI-Reviewed-By:` trailer bound into `Evidence-ID`) or `publish-pr` (records `Branch AI-Reviewed-By:` locally per HEAD OID; clear via `--clear-reviewers`):
+```bash
+--reviewed-by "claude-opus-5-5-high via Antigravity CLI" \
+--reviewed-by "gpt-6.2-astra (xhigh) via Codex CLI"
+```
