@@ -30,9 +30,9 @@
 
 ## Launch Film — Our Philosophy in 68 Seconds
 
-https://github.com/user-attachments/assets/5ea90264-f838-40d0-aca1-8581c10a683c
+https://github.com/user-attachments/assets/eace25a5-b892-4e14-9f8f-736ac110578a
 
-*1080p · BT.709 · Sound on. Beat-cut horizons, a typed challenge — "Prove that this commit actually fixed the bug." — fourteen ways AI commits fail, then a self-drawing making-of: staged tree `T`, an `--overlay` Before on `P`, byte-exact After quotes, and a GitHub PR carrying its own proof. On-screen runs are illustrative; every output line uses the real `proof_commit.mjs` format.*
+*1080p · BT.709 · Sound on (scored with real chamber orchestra & foley: VSCO 2 CE CC0, Freesound CC0, and coastal surf by Luftrum CC BY 3.0). Beat-cut horizons, a typed challenge — "Prove that this commit actually fixed the bug." — fourteen ways AI commits fail, then a self-drawing making-of: staged tree `T`, an `--overlay` Before on `P`, byte-exact After quotes, and a GitHub PR carrying its own proof. On-screen runs are illustrative; every output line uses the real `proof_commit.mjs` format.*
 
 ---
 

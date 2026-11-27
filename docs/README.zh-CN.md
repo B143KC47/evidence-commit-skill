@@ -30,9 +30,9 @@
 
 ## 理念宣传片 — 68 秒看懂为什么需要 Evidence Commit
 
-https://github.com/user-attachments/assets/5ea90264-f838-40d0-aca1-8581c10a683c
+https://github.com/user-attachments/assets/eace25a5-b892-4e14-9f8f-736ac110578a
 
-*1080p · BT.709（建议开启声音）。卡点切换的地平线蒙太奇、一句打字挑战——“Prove that this commit actually fixed the bug.”——十四种 AI 提交的典型失败，随后是自绘式幕后演示：暂存树 `T`、在父提交 `P` 上用 `--overlay` 采集 Before、字节级精确的 After 引文，以及自带证据的 GitHub PR。片中运行为演示样例，所有输出行均采用 `proof_commit.mjs` 的真实格式。*
+*1080p · BT.709（建议开启声音：采用 VSCO 2 CE CC0 真实室内管弦乐采样、Freesound CC0 拟音及 Luftrum CC BY 3.0 海岸实录编排）。卡点切换的地平线蒙太奇、一句打字挑战——“Prove that this commit actually fixed the bug.”——十四种 AI 提交的典型失败，随后是自绘式幕后演示：暂存树 `T`、在父提交 `P` 上用 `--overlay` 采集 Before、字节级精确的 After 引文，以及自带证据的 GitHub PR。片中运行为演示样例，所有输出行均采用 `proof_commit.mjs` 的真实格式。*
 
 ---
 
